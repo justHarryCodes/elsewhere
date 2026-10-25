@@ -1,7 +1,13 @@
 import { useEffect, useMemo, useRef, useState } from 'react';
 import {
+  HAIR_COLORS,
+  HAIR_STYLES,
   HUMAN_ANIMATIONS,
   HUMAN_BODIES,
+  SKIN_TONES,
+  type HairColor,
+  type HairStyle,
+  type SkinTone,
   PAINT_FINISHES,
   VEHICLE_MODELS,
   type AnimationLibrary,
@@ -97,7 +103,7 @@ export function SandboxPage() {
         </div>
       )}
 
-      <aside className="absolute top-0 left-0 flex h-full w-80 max-w-[85vw] flex-col gap-3 overflow-hidden bg-slate-950/85 p-4 text-sm backdrop-blur">
+      <aside className="absolute top-0 left-0 flex h-full w-80 max-w-[85vw] flex-col gap-3 overflow-y-auto bg-slate-950/85 p-4 text-sm backdrop-blur">
         <header className="flex items-center justify-between">
           <h1 className="text-base font-semibold">Movement sandbox</h1>
           <a href="/" className="text-indigo-300 hover:text-indigo-200">
@@ -124,12 +130,67 @@ export function SandboxPage() {
           <span>{stats?.fps.toFixed(0) ?? 0}</span>
         </section>
 
-        <Segmented
-          label="Body"
-          options={Object.keys(HUMAN_BODIES) as HumanBody[]}
-          value={stats?.body}
-          onChange={(body) => sandbox()?.setBody(body)}
-        />
+        <section className="flex flex-col gap-2 rounded-lg bg-slate-900 p-3">
+          <h2 className="text-xs font-semibold tracking-wide text-slate-400 uppercase">Character</h2>
+          <div className="flex gap-2">
+            <select
+              id="character-body"
+              value={stats?.body ?? 'male'}
+              onChange={(event) => {
+                sandbox()?.setBody(event.target.value as HumanBody);
+                event.currentTarget.blur();
+              }}
+              className="min-w-0 flex-1 rounded-md bg-slate-800 px-2 py-1 outline-none focus:ring-2 focus:ring-indigo-500"
+            >
+              {(Object.keys(HUMAN_BODIES) as HumanBody[]).map((body) => (
+                <option key={body} value={body}>
+                  {HUMAN_BODIES[body].label}
+                </option>
+              ))}
+            </select>
+            <select
+              id="character-hair"
+              value={stats?.appearance.hair ?? 'none'}
+              onChange={(event) => {
+                sandbox()?.setAppearance({ hair: event.target.value as HairStyle });
+                event.currentTarget.blur();
+              }}
+              className="min-w-0 flex-1 rounded-md bg-slate-800 px-2 py-1 outline-none focus:ring-2 focus:ring-indigo-500"
+            >
+              {(Object.keys(HAIR_STYLES) as HairStyle[]).map((hair) => (
+                <option key={hair} value={hair}>
+                  {HAIR_STYLES[hair].label}
+                </option>
+              ))}
+            </select>
+          </div>
+          <Swatches
+            label="Skin"
+            options={(Object.keys(SKIN_TONES) as SkinTone[]).map((key) => ({ key, label: SKIN_TONES[key].label, colour: skinSwatch(key) }))}
+            value={stats?.appearance.skin}
+            onChange={(skin) => sandbox()?.setAppearance({ skin })}
+          />
+          <Swatches
+            label="Hair colour"
+            options={(Object.keys(HAIR_COLORS) as HairColor[]).map((key) => ({ key, label: HAIR_COLORS[key].label, colour: HAIR_COLORS[key].hex }))}
+            value={stats?.appearance.hairColor}
+            onChange={(hairColor) => sandbox()?.setAppearance({ hairColor })}
+          />
+          {stats && HUMAN_BODIES[stats.body].base === 'male' && (
+            <label className="flex items-center gap-2">
+              <input
+                id="character-beard"
+                type="checkbox"
+                checked={stats.appearance.beard}
+                onChange={(event) => {
+                  sandbox()?.setAppearance({ beard: event.target.checked });
+                  event.currentTarget.blur();
+                }}
+              />
+              Beard
+            </label>
+          )}
+        </section>
         <Segmented
           label="Move mode"
           options={MOVE_MODES}
@@ -297,7 +358,7 @@ export function SandboxPage() {
           </div>
         </section>
 
-        <section className="flex min-h-0 flex-1 flex-col gap-2">
+        <section className="flex min-h-64 flex-1 flex-col gap-2">
           <input
             value={query}
             onChange={(event) => setQuery(event.target.value)}
@@ -342,6 +403,48 @@ export function SandboxPage() {
           wheel to zoom · In the car: W/S throttle and brake (hold S to reverse) · A/D steer · Space handbrake
         </footer>
       </aside>
+    </div>
+  );
+}
+
+// The skin texture averages this colour; each tone tints it.
+const BASE_SKIN = [156, 110, 78];
+function skinSwatch(tone: SkinTone) {
+  const tint = SKIN_TONES[tone].tint;
+  const channel = (i: number) => Math.min(255, Math.round(BASE_SKIN[i] * tint[i]));
+  return `rgb(${channel(0)}, ${channel(1)}, ${channel(2)})`;
+}
+
+function Swatches<T extends string>({
+  label,
+  options,
+  value,
+  onChange,
+}: {
+  label: string;
+  options: { key: T; label: string; colour: string }[];
+  value: T | undefined;
+  onChange: (option: T) => void;
+}) {
+  return (
+    <div className="flex flex-col gap-1">
+      <span className="text-xs text-slate-400">{label}</span>
+      <div className="flex flex-wrap gap-1.5">
+        {options.map((option) => (
+          <button
+            key={option.key}
+            type="button"
+            title={option.label}
+            aria-label={option.label}
+            onClick={(event) => {
+              onChange(option.key);
+              event.currentTarget.blur();
+            }}
+            className={`h-6 w-6 rounded-full border-2 ${value === option.key ? 'border-indigo-400' : 'border-slate-700'}`}
+            style={{ backgroundColor: option.colour }}
+          />
+        ))}
+      </div>
     </div>
   );
 }

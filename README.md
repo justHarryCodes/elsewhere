@@ -47,8 +47,15 @@ The header toggle switches between the Babylon.js and Three.js renderers.
   retargeted by bone name.
 - `packages/shared/src/humans.ts` maps game names (`idle`, `jog`, `swordCombo`, ...) to clips. UAL2 is the
   primary library; core locomotion (idle/walk/jog/sprint/jump) comes from UAL1 because UAL2 has none.
+- **Six body types** (`HUMAN_BODIES`): man, woman, slim man, slim woman, teen boy, teen girl. Slim and teen
+  bodies are made from the two bases by thinning the mesh around each bone (`BODY_SHAPES`, applied in
+  `reshapeSkinnedMesh`); teens are also scaled to teen height with a slightly larger head.
+- **Appearance** (`HumanAppearance`): 8 skin tones, 6 hairstyles (or bald), 8 hair colours, and a beard for male
+  bodies. Hairstyles share the body skeleton, so they follow every animation.
 - Server sets `animation` from movement speed; clients send `Messages.Action` for emotes/attacks (keys 1-5).
 - Renderers: `game/babylon/humans.ts` and `game/three/humans.ts` (`HumanLibrary.load()` then `createHuman()`).
+  The Babylon renderer supports body shapes and appearance; the Three.js one draws the base body at the
+  right height.
 
 ## Vehicles
 

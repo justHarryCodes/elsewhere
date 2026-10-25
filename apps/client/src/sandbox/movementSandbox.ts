@@ -26,7 +26,10 @@ import {
   type HeadlightMode,
   type HumanAnimation,
   type PaintFinish,
+  HUMAN_BODIES,
+  type HumanAppearance,
   type HumanBody,
+  defaultAppearance,
   type SizeKey,
   type VehicleModelKey,
 } from '@game/shared';
@@ -40,6 +43,7 @@ export interface SandboxStats {
   loading: boolean;
   error?: string;
   body: HumanBody;
+  appearance: HumanAppearance;
   animation?: HumanAnimation;
   moveMode: MoveMode;
   speed: number;
@@ -117,6 +121,7 @@ export class MovementSandbox {
   private disposed = false;
 
   private body: HumanBody = 'male';
+  private appearance: HumanAppearance = defaultAppearance('male');
   private moveMode: MoveMode = 'jog';
   // Mode to return to when Shift (sprint) is released.
   private baseMoveMode: MoveMode = 'jog';
@@ -129,6 +134,7 @@ export class MovementSandbox {
   private error?: string;
 
   private readonly hemi: HemisphericLight;
+  private readonly glow: GlowLayer;
   private readonly sun: DirectionalLight;
   private groundMaterial?: StandardMaterial;
   private vehicle?: SandboxVehicle;
@@ -160,8 +166,8 @@ export class MovementSandbox {
     this.shadows = new ShadowGenerator(2048, this.sun);
     this.shadows.useBlurExponentialShadowMap = true;
     // Lamps glow through their emissive colour; this layer adds the bloom around them.
-    const glow = new GlowLayer('glow', this.scene, { blurKernelSize: 48 });
-    glow.intensity = 0.9;
+    this.glow = new GlowLayer('glow', this.scene, { blurKernelSize: 48 });
+    this.glow.intensity = 0.9;
     // Sky reflections: metallic and clear-coated paint (and every glTF material) light from this.
     this.scene.environmentTexture = new HDRCubeTexture('/assets/environment/sky.hdr', this.scene, 256, false, true, false, true);
     this.scene.environmentIntensity = DAY.env;
@@ -202,8 +208,34 @@ export class MovementSandbox {
 
   setBody(body: HumanBody) {
     if (body === this.body) return;
+    // Switching between male and female bodies resets the hair to suit; skin carries over.
+    const sameBase = HUMAN_BODIES[this.body].base === HUMAN_BODIES[body].base;
     this.body = body;
+    if (!sameBase) this.appearance = { ...this.appearance, hair: defaultAppearance(body).hair, beard: false };
+    this.leaveVehicleNow();
     this.spawn();
+  }
+
+  setAppearance(change: Partial<HumanAppearance>) {
+    this.appearance = { ...this.appearance, ...change };
+    if (!this.character) return;
+    this.character.setAppearance(this.appearance);
+    for (const mesh of this.character.hairMeshes) this.shadows.addShadowCaster(mesh);
+  }
+
+  /** Puts the character straight back on their feet beside the car (no animation). */
+  private leaveVehicleNow() {
+    if (!this.character || (!this.driving && !this.boarding)) return;
+    this.detachDriver();
+    this.driving = false;
+    this.boarding = undefined;
+    const root = this.character.root;
+    root.setEnabled(true);
+    if (this.vehicle) {
+      const door = this.vehicle.exitPoint();
+      root.position.set(door.x, 0, door.z);
+      root.rotation.set(0, door.heading, 0);
+    }
   }
 
   setMoveMode(mode: MoveMode) {
@@ -369,6 +401,7 @@ export class MovementSandbox {
       loading: !this.character && !this.error,
       error: this.error,
       body: this.body,
+      appearance: this.appearance,
       animation: this.character?.animation,
       moveMode: this.moveMode,
       speed: this.speed,
@@ -399,7 +432,7 @@ export class MovementSandbox {
   private spawn() {
     if (!this.library) return;
     const previous = this.character;
-    this.character = this.library.createHuman(this.body, 'sandbox');
+    this.character = this.library.createHuman(this.body, 'sandbox', this.appearance);
     if (previous) {
       this.character.root.position.copyFrom(previous.root.position);
       this.character.root.rotation.y = previous.root.rotation.y;
@@ -697,6 +730,7 @@ export class MovementSandbox {
     plane.material = material;
     plane.position = position;
     plane.billboardMode = Mesh.BILLBOARDMODE_ALL;
+    this.glow.addExcludedMesh(plane); // labels are bright (emissive) but aren't lamps
     return plane;
   }
 }

@@ -12,17 +12,103 @@ export const ANIMATION_LIBRARIES = {
 } as const;
 export type AnimationLibrary = keyof typeof ANIMATION_LIBRARIES;
 
+const MALE_URL = "/assets/characters/base/Superhero_Male_FullBody.gltf";
+const FEMALE_URL = "/assets/characters/base/Superhero_Female_FullBody.gltf";
+
+/**
+ * Body shapes, made from the two base bodies by thinning the mesh around each bone (see
+ * reshapeSkinnedMesh in the renderers). Factors scale a bone's cross-section (its local X and Z;
+ * every bone in this rig runs along its local Y), or all three axes when `uniform`. Bones that
+ * aren't listed keep their shape. Matched against bone names in order; the first match wins.
+ */
+export interface BodyShape {
+  bones: readonly { match: RegExp; scale: readonly [number, number, number] }[];
+}
+
+const SLIM_BONES: BodyShape["bones"] = [
+  { match: /^(pelvis|spine_0[1-3])$/, scale: [0.85, 1, 0.85] },
+  { match: /^clavicle_/, scale: [0.88, 1, 0.88] },
+  { match: /^upperarm_/, scale: [0.8, 1, 0.8] },
+  { match: /^lowerarm_/, scale: [0.84, 1, 0.84] },
+  { match: /^thigh_/, scale: [0.86, 1, 0.86] },
+  { match: /^calf_/, scale: [0.88, 1, 0.88] },
+  { match: /^neck_/, scale: [0.88, 1, 0.88] },
+];
+
+export const BODY_SHAPES = {
+  regular: { bones: [] },
+  slim: { bones: SLIM_BONES },
+  // Teens: a slim build, and a slightly larger head for their height (the whole body is then
+  // scaled down to teen height, so the head ends up a little bigger in proportion).
+  teen: { bones: [{ match: /^head$/i, scale: [1.08, 1.08, 1.08] }, ...SLIM_BONES] },
+} as const satisfies Record<string, BodyShape>;
+export type BodyShapeKey = keyof typeof BODY_SHAPES;
+
 export const HUMAN_BODIES = {
-  male: {
-    url: "/assets/characters/base/Superhero_Male_FullBody.gltf",
-    size: "human.adultMale",
-  },
-  female: {
-    url: "/assets/characters/base/Superhero_Female_FullBody.gltf",
-    size: "human.adultFemale",
-  },
-} as const satisfies Record<string, { url: string; size: SizeKey }>;
+  male: { label: "Man", base: "male", url: MALE_URL, size: "human.adultMale", shape: "regular" },
+  female: { label: "Woman", base: "female", url: FEMALE_URL, size: "human.adultFemale", shape: "regular" },
+  maleSlim: { label: "Slim man", base: "male", url: MALE_URL, size: "human.adultMale", shape: "slim" },
+  femaleSlim: { label: "Slim woman", base: "female", url: FEMALE_URL, size: "human.adultFemale", shape: "slim" },
+  teenBoy: { label: "Teen boy", base: "male", url: MALE_URL, size: "human.teen", shape: "teen" },
+  teenGirl: { label: "Teen girl", base: "female", url: FEMALE_URL, size: "human.teen", shape: "teen" },
+} as const satisfies Record<
+  string,
+  { label: string; base: "male" | "female"; url: string; size: SizeKey; shape: BodyShapeKey }
+>;
 export type HumanBody = keyof typeof HUMAN_BODIES;
+
+// ------------------------------------------------------------------ appearance
+
+/** Skin tones: a tint over the base skin texture (a mid tan), so >1 lightens and <1 darkens. */
+export const SKIN_TONES = {
+  porcelain: { label: "Porcelain", tint: [1.38, 1.28, 1.22] },
+  fair: { label: "Fair", tint: [1.24, 1.12, 1.04] },
+  light: { label: "Light", tint: [1.1, 1.0, 0.94] },
+  medium: { label: "Medium", tint: [1, 1, 1] },
+  tan: { label: "Tan", tint: [0.86, 0.78, 0.72] },
+  brown: { label: "Brown", tint: [0.66, 0.55, 0.49] },
+  dark: { label: "Dark", tint: [0.47, 0.37, 0.33] },
+  deep: { label: "Deep", tint: [0.32, 0.25, 0.22] },
+} as const satisfies Record<string, { label: string; tint: readonly [number, number, number] }>;
+export type SkinTone = keyof typeof SKIN_TONES;
+
+/** Hairstyles from the Universal Base Characters pack, skinned to the same skeleton as the bodies. */
+export const HAIR_STYLES = {
+  none: { label: "Bald", url: null },
+  buzzed: { label: "Buzz cut", url: "/assets/characters/hairstyles/Hair_Buzzed.gltf" },
+  buzzedFemale: { label: "Pixie", url: "/assets/characters/hairstyles/Hair_BuzzedFemale.gltf" },
+  parted: { label: "Side part", url: "/assets/characters/hairstyles/Hair_SimpleParted.gltf" },
+  long: { label: "Long", url: "/assets/characters/hairstyles/Hair_Long.gltf" },
+  buns: { label: "Buns", url: "/assets/characters/hairstyles/Hair_Buns.gltf" },
+} as const satisfies Record<string, { label: string; url: string | null }>;
+export type HairStyle = keyof typeof HAIR_STYLES;
+export const BEARD_URL = "/assets/characters/hairstyles/Hair_Beard.gltf";
+
+/** Hair colours: the hair textures are neutral grey, so these tint them directly. */
+export const HAIR_COLORS = {
+  black: { label: "Black", hex: "#1c1714" },
+  darkBrown: { label: "Dark brown", hex: "#3b2516" },
+  brown: { label: "Brown", hex: "#6b4226" },
+  auburn: { label: "Auburn", hex: "#8a3b1e" },
+  ginger: { label: "Ginger", hex: "#b8572a" },
+  blonde: { label: "Blonde", hex: "#d9b46a" },
+  platinum: { label: "Platinum", hex: "#e8e0d0" },
+  grey: { label: "Grey", hex: "#9a9690" },
+} as const satisfies Record<string, { label: string; hex: string }>;
+export type HairColor = keyof typeof HAIR_COLORS;
+
+export interface HumanAppearance {
+  skin: SkinTone;
+  hair: HairStyle;
+  hairColor: HairColor;
+  /** Male bodies only. */
+  beard: boolean;
+}
+
+export function defaultAppearance(body: HumanBody): HumanAppearance {
+  const male = HUMAN_BODIES[body].base === "male";
+  return { skin: "medium", hair: male ? "parted" : "long", hairColor: "darkBrown", beard: false };
+}
 
 export interface HumanClip {
   library: AnimationLibrary;
