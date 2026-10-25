@@ -15,15 +15,16 @@ import "@babylonjs/loaders/glTF";
 import { WORLD_HALF_SIZE, toHumanAnimation, toHumanBody } from "@game/shared";
 import type { PlayersRef } from "../../net/useGameRoom";
 import { approachAngle, smoothing } from "../smoothing";
+import {
+  CAMERA_DISTANCE,
+  CAMERA_MAX_DISTANCE,
+  CAMERA_MIN_DISTANCE,
+  CAMERA_POLAR,
+  CAMERA_TARGET_HEIGHT,
+} from "../camera";
 import { type HumanCharacter, HumanLibrary } from "./humans";
 
-// Camera tuning
 const CAMERA_ALPHA = Math.PI / 2; // horizontal angle (PI/2 = behind the player, looking toward -Z)
-const CAMERA_BETA = Math.PI / 4; // angle from straight up: PI/4 = 45° overhead
-const CAMERA_RADIUS = 20; // distance from the player: bigger = more zoomed out
-const CAMERA_MIN_RADIUS = 10; // closest the mouse wheel can zoom
-const CAMERA_MAX_RADIUS = 35; // farthest the mouse wheel can zoom
-const CAMERA_TARGET_HEIGHT = 1; // aim at chest height instead of the feet (set 0 for feet)
 
 export function BabylonScene({
   players,
@@ -45,13 +46,13 @@ export function BabylonScene({
     const camera = new ArcRotateCamera(
       "camera",
       CAMERA_ALPHA,
-      CAMERA_BETA,
-      CAMERA_RADIUS,
+      CAMERA_POLAR,
+      CAMERA_DISTANCE,
       Vector3.Zero(),
       scene,
     );
-    camera.lowerRadiusLimit = CAMERA_MIN_RADIUS;
-    camera.upperRadiusLimit = CAMERA_MAX_RADIUS;
+    camera.lowerRadiusLimit = CAMERA_MIN_DISTANCE;
+    camera.upperRadiusLimit = CAMERA_MAX_DISTANCE;
     // Arrow keys move the player, not the camera.
     camera.inputs.removeByType("ArcRotateCameraKeyboardMoveInput");
     camera.attachControl(canvas, true);
