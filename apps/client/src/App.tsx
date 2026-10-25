@@ -1,5 +1,8 @@
-import { useState } from "react";
-import { BabylonScene } from "./game/babylon/BabylonScene";
+import { useCallback, useMemo, useRef, useState } from "react";
+import { generateCity } from "@game/shared";
+import { BabylonScene, type SceneControls } from "./game/babylon/BabylonScene";
+import { type CameraView, CameraControls } from "./game/CameraControls";
+import { CityMap } from "./game/CityMap";
 import { ThreeScene } from "./game/three/ThreeScene";
 import { ACTION_HOTKEYS, useActionHotkeys } from "./game/useActionHotkeys";
 import { useKeyboardInput } from "./game/useKeyboardInput";
@@ -9,18 +12,42 @@ type Renderer = "babylon" | "three";
 
 export function App() {
   const [renderer, setRenderer] = useState<Renderer>("babylon");
-  const { status, players, playerIds, sessionId, citySeed, sendInput, sendAction } =
+  const { status, players, playerIds, sessionId, citySeed, sendInput, sendAction, sendTeleport } =
     useGameRoom();
   useKeyboardInput(sendInput);
   useActionHotkeys(sendAction);
+  // Everyone builds the same city from the room's seed.
+  const city = useMemo(() => (citySeed === undefined ? undefined : generateCity({ seed: citySeed })), [citySeed]);
+  const [night, setNight] = useState(true);
+  const [view, setView] = useState<CameraView>("chase");
+  const [mapOpen, setMapOpen] = useState(false);
+  const controls = useRef<SceneControls>(undefined);
+  const me = useCallback(() => {
+    const player = sessionId ? players.current.get(sessionId) : undefined;
+    return player && { x: player.x, z: player.z, heading: player.heading };
+  }, [players, sessionId]);
 
   return (
     <div className="relative h-full w-full overflow-hidden bg-slate-950 text-slate-100">
-      {citySeed === undefined ? null : renderer === "babylon" ? (
-        <BabylonScene players={players} selfId={sessionId} citySeed={citySeed} />
+      {!city ? null : renderer === "babylon" ? (
+        <BabylonScene players={players} selfId={sessionId} city={city} night={night} view={view} controlsRef={controls} />
       ) : (
-        <ThreeScene players={players} selfId={sessionId} citySeed={citySeed} />
+        <ThreeScene players={players} selfId={sessionId} city={city} />
       )}
+      {mapOpen && city && (
+        <CityMap city={city} player={me} onNavigate={sendTeleport} onClose={() => setMapOpen(false)} />
+      )}
+      <div className="absolute right-4 bottom-4 z-10">
+        <CameraControls
+          view={view}
+          night={night}
+          onView={setView}
+          onRotate={(radians) => controls.current?.rotate(radians)}
+          onZoom={(factor) => controls.current?.zoom(factor)}
+          onMap={() => setMapOpen((open) => !open)}
+          onNight={setNight}
+        />
+      </div>
 
       <header className="pointer-events-none absolute inset-x-0 top-0 flex items-start justify-between gap-4 p-4">
         <div className="pointer-events-auto rounded-lg bg-slate-900/80 px-4 py-3 text-sm shadow-lg backdrop-blur">

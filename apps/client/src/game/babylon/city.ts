@@ -1,17 +1,32 @@
 import {
   Color3,
+  Constants,
+  DynamicTexture,
   LoadAssetContainerAsync,
   Matrix,
   Mesh,
   MeshBuilder,
   Quaternion,
+  PBRMaterial,
   type Scene,
   StandardMaterial,
+  Texture,
   TransformNode,
   Vector3,
 } from '@babylonjs/core';
 import '@babylonjs/loaders/glTF';
-import { CITY_MODELS, CITY_UNIT, KERB_HEIGHT, type City, type CityModelKey, type CityObject, type CityZone } from '@game/shared';
+import {
+  CITY_MODELS,
+  CITY_NEON_COLORS,
+  CITY_UNIT,
+  KERB_HEIGHT,
+  type City,
+  type CityLight,
+  type CityModelKey,
+  type CityNeon,
+  type CityObject,
+  type CityZone,
+} from '@game/shared';
 
 // The city streams in square chunks round the player: built (rising out of the ground) when they
 // come within BUILD_RADIUS, taken down again (sinking away) once they're past KEEP_RADIUS. The gap
@@ -22,12 +37,30 @@ const KEEP_RADIUS = 300;
 const RISE_SECONDS = 0.7;
 const SINK_SECONDS = 0.5;
 
+const POOL_RADIUS = 7; // metres of road lit under a street lamp
+const POOL_Y = 0.1; // just above the sidewalks, so the light pools never flicker into them
+
+// Lots are dark paving and scrubby grass: the night glow is what gives the city its colour.
 const GROUND_COLOURS: Record<CityZone | 'outside', Color3> = {
-  residential: new Color3(0.36, 0.55, 0.3),
-  commercial: new Color3(0.54, 0.54, 0.52),
-  industrial: new Color3(0.44, 0.44, 0.42),
-  outside: new Color3(0.4, 0.52, 0.34),
+  residential: new Color3(0.27, 0.4, 0.27),
+  commercial: new Color3(0.3, 0.3, 0.34),
+  industrial: new Color3(0.26, 0.26, 0.28),
+  outside: new Color3(0.28, 0.36, 0.26),
 };
+
+// What the windows glow at night, per model: mostly warm or cool interiors, some neon-lit.
+const WINDOW_TINTS = [
+  new Color3(1, 0.7, 0.4),
+  new Color3(1, 0.7, 0.4),
+  new Color3(0.55, 0.8, 1),
+  new Color3(0.55, 0.8, 1),
+  new Color3(0.15, 0.9, 1),
+  new Color3(1, 0.25, 0.8),
+];
+const WINDOW_BRIGHTNESS: Record<string, number> = { commercial: 0.7, suburban: 0.6, industrial: 0.5 };
+
+/** What a city mesh is, for callers that treat them differently (e.g. only neon in a glow layer). */
+export type CityMeshKind = 'ground' | 'building' | 'neon' | 'lamp' | 'pool';
 
 interface Chunk {
   key: string;
@@ -35,6 +68,8 @@ interface Chunk {
   x0: number;
   z0: number;
   byModel: Map<CityModelKey, CityObject[]>;
+  neon: Map<number, CityNeon[]>;
+  lights: Map<number, CityLight[]>;
   state: 'empty' | 'loading' | 'rising' | 'built' | 'sinking';
   meshes: Mesh[];
   /** Progress of the current rise or sink, 0..1. */
@@ -44,8 +79,8 @@ interface Chunk {
 export interface CityRendererOptions {
   /** Grass all round the city (off when the scene has its own ground there). */
   outsideGround?: boolean;
-  /** Called for every mesh the city creates, e.g. to keep it out of a glow layer. */
-  onMesh?: (mesh: Mesh) => void;
+  /** Called for every mesh the city creates, e.g. to keep all but the neon out of a glow layer. */
+  onMesh?: (mesh: Mesh, kind: CityMeshKind) => void;
 }
 
 /**
@@ -53,6 +88,9 @@ export interface CityRendererOptions {
  * frame. Every model is loaded the first time a chunk needs it and merged into one mesh; each copy
  * of it in a chunk is a thin instance, so a chunk costs one draw call per kind of model in it.
  * Lots (the ground between roads) are cheap and always there.
+ *
+ * Neon (shop-front tubes, blade signs, billboards, tower outlines) glows day and night. At night
+ * (setNight) the windows light up, and street lamps glow and throw pools of coloured light.
  */
 export class CityRenderer {
   readonly root: TransformNode;
@@ -61,31 +99,89 @@ export class CityRenderer {
   private readonly chunks: Chunk[] = [];
   private readonly sources = new Map<CityModelKey, Promise<Mesh | undefined>>();
   private disposed = false;
+  private night = false;
+  /** Lamp heads and light pools: drawn only at night. */
+  private readonly nightOnly = new Set<Mesh>();
+  /** Building materials and the glow colour of their windows. */
+  private readonly windowMaterials = new Map<PBRMaterial, Color3>();
+  private readonly nightMaps = new Map<string, Texture>();
+  private readonly neonMaterials: StandardMaterial[];
+  private readonly poolMaterials: StandardMaterial[];
 
   private constructor(
     private readonly scene: Scene,
-    private readonly onMesh?: (mesh: Mesh) => void,
+    private readonly onMesh?: (mesh: Mesh, kind: CityMeshKind) => void,
   ) {
     this.root = new TransformNode('city', scene);
+    this.neonMaterials = CITY_NEON_COLORS.map((hex, i) => {
+      const material = new StandardMaterial(`city-neon-${i}`, scene);
+      material.disableLighting = true;
+      material.diffuseColor = Color3.Black();
+      material.emissiveColor = Color3.FromHexString(hex);
+      material.freeze();
+      return material;
+    });
+    // A soft round spot, bright in the middle and fading to nothing, added onto whatever is under it.
+    const spot = new DynamicTexture('city-light-pool', { width: 128, height: 128 }, scene, false);
+    const ctx = spot.getContext();
+    const gradient = ctx.createRadialGradient(64, 64, 0, 64, 64, 64);
+    gradient.addColorStop(0, 'rgba(255,255,255,1)');
+    gradient.addColorStop(0.35, 'rgba(255,255,255,0.55)');
+    gradient.addColorStop(1, 'rgba(255,255,255,0)');
+    ctx.fillStyle = gradient;
+    ctx.fillRect(0, 0, 128, 128);
+    spot.update();
+    spot.hasAlpha = true;
+    this.poolMaterials = CITY_NEON_COLORS.map((hex, i) => {
+      const material = new StandardMaterial(`city-pool-${i}`, scene);
+      material.disableLighting = true;
+      material.diffuseColor = Color3.Black();
+      material.emissiveTexture = spot;
+      material.opacityTexture = spot;
+      material.emissiveColor = Color3.FromHexString(hex).scale(0.4); // faint, so it tints rather than whitens
+      material.alphaMode = Constants.ALPHA_ADD;
+      material.disableDepthWrite = true;
+      material.freeze();
+      return material;
+    });
+  }
+
+  /** Night: lit windows, glowing lamps and pools of light under them. Neon is on either way. */
+  setNight(night: boolean) {
+    this.night = night;
+    for (const mesh of this.nightOnly) mesh.setEnabled(night);
+    for (const [material, tint] of this.windowMaterials) this.applyWindows(material, tint);
+  }
+
+  private applyWindows(material: PBRMaterial, tint: Color3) {
+    material.unfreeze();
+    material.emissiveColor = this.night ? tint : Color3.Black();
+    material.freeze();
   }
 
   static create(scene: Scene, city: City, { outsideGround = true, onMesh }: CityRendererOptions = {}): CityRenderer {
     const renderer = new CityRenderer(scene, onMesh);
     renderer.addGround(city, outsideGround);
     const chunks = new Map<string, Chunk>();
-    for (const o of [...city.roads, ...city.objects]) {
-      const cx = Math.floor(o.x / CHUNK);
-      const cz = Math.floor(o.z / CHUNK);
+    const chunkAt = (x: number, z: number) => {
+      const cx = Math.floor(x / CHUNK);
+      const cz = Math.floor(z / CHUNK);
       const key = `${cx},${cz}`;
       let chunk = chunks.get(key);
       if (!chunk) {
-        chunk = { key, x0: cx * CHUNK, z0: cz * CHUNK, byModel: new Map(), state: 'empty', meshes: [], t: 0 };
+        chunk = { key, x0: cx * CHUNK, z0: cz * CHUNK, byModel: new Map(), neon: new Map(), lights: new Map(), state: 'empty', meshes: [], t: 0 };
         chunks.set(key, chunk);
       }
-      const list = chunk.byModel.get(o.model);
-      if (list) list.push(o);
-      else chunk.byModel.set(o.model, [o]);
-    }
+      return chunk;
+    };
+    const addTo = <K, V>(map: Map<K, V[]>, key: K, value: V) => {
+      const list = map.get(key);
+      if (list) list.push(value);
+      else map.set(key, [value]);
+    };
+    for (const o of [...city.roads, ...city.objects]) addTo(chunkAt(o.x, o.z).byModel, o.model, o);
+    for (const n of city.neon) addTo(chunkAt(n.x, n.z).neon, n.color, n);
+    for (const l of city.lights) addTo(chunkAt(l.x, l.z).lights, l.color, l);
     renderer.chunks.push(...chunks.values());
     return renderer;
   }
@@ -178,13 +274,59 @@ export class CityRenderer {
       mesh.thinInstanceRefreshBoundingInfo(false);
       mesh.receiveShadows = true;
       mesh.isPickable = false;
-      mesh.scaling.y = 0.001;
-      chunk.meshes.push(mesh);
-      this.meshes.add(mesh);
-      this.onMesh?.(mesh);
+      this.addToChunk(chunk, mesh, 'building');
     });
+
+    // Neon tubes and signs, and at night the lamp heads, one batch per colour.
+    for (const [color, boxes] of chunk.neon) {
+      this.addBoxes(chunk, `city-neon-${color}-${chunk.key}`, boxes, this.neonMaterials[color], 'neon');
+    }
+    for (const [color, lights] of chunk.lights) {
+      const heads = lights.map((l) => ({ x: l.x, y: l.y, z: l.z, hx: 0.35, hy: 0.07, hz: 0.35 }));
+      this.addBoxes(chunk, `city-lamp-${color}-${chunk.key}`, heads, this.neonMaterials[color], 'lamp');
+      const pool = MeshBuilder.CreateGround(`city-pool-${color}-${chunk.key}`, { width: 1, height: 1 }, this.scene);
+      pool.material = this.poolMaterials[color];
+      const matrices = new Float32Array(lights.length * 16);
+      lights.forEach((l, j) => {
+        Matrix.ComposeToRef(new Vector3(POOL_RADIUS * 2, 1, POOL_RADIUS * 2), Quaternion.Identity(), new Vector3(l.x, POOL_Y, l.z), m);
+        m.copyToArray(matrices, j * 16);
+      });
+      pool.thinInstanceSetBuffer('matrix', matrices, 16, true);
+      pool.thinInstanceRefreshBoundingInfo(false);
+      this.addToChunk(chunk, pool, 'pool');
+    }
     chunk.t = 0;
     chunk.state = 'rising';
+  }
+
+  /** Unit boxes stretched into place as thin instances. */
+  private addBoxes(chunk: Chunk, name: string, boxes: { x: number; y: number; z: number; hx: number; hy: number; hz: number }[], material: StandardMaterial, kind: CityMeshKind) {
+    const mesh = MeshBuilder.CreateBox(name, { size: 1 }, this.scene);
+    mesh.material = material;
+    const matrices = new Float32Array(boxes.length * 16);
+    const m = new Matrix();
+    boxes.forEach((b, j) => {
+      Matrix.ComposeToRef(new Vector3(b.hx * 2, b.hy * 2, b.hz * 2), Quaternion.Identity(), new Vector3(b.x, b.y, b.z), m);
+      m.copyToArray(matrices, j * 16);
+    });
+    mesh.thinInstanceSetBuffer('matrix', matrices, 16, true);
+    mesh.thinInstanceRefreshBoundingInfo(false);
+    this.addToChunk(chunk, mesh, kind);
+  }
+
+  private addToChunk(chunk: Chunk, mesh: Mesh, kind: CityMeshKind) {
+    mesh.parent = this.root;
+    mesh.isPickable = false;
+    mesh.scaling.y = 0.001;
+    if (kind === 'building') mesh.receiveShadows = true;
+    if (kind === 'lamp' || kind === 'pool') {
+      this.nightOnly.add(mesh);
+      mesh.setEnabled(this.night);
+      mesh.onDisposeObservable.addOnce(() => this.nightOnly.delete(mesh));
+    }
+    chunk.meshes.push(mesh);
+    this.meshes.add(mesh);
+    this.onMesh?.(mesh, kind);
   }
 
   /** The model loaded and merged into one hidden mesh, loaded once on first use. */
@@ -213,9 +355,29 @@ export class CityRenderer {
     for (const node of container.rootNodes) if (node !== merged) node.dispose();
     merged.name = `city-source-${model}`;
     merged.parent = this.root;
+    if (merged.material instanceof PBRMaterial) this.addWindows(model, merged.material);
     merged.material?.freeze();
     merged.setEnabled(false); // never drawn itself; chunks draw copies of it
     return merged;
+  }
+
+  /** Building windows glow at night: the kit's night map lights just the window glass. */
+  private addWindows(model: CityModelKey, material: PBRMaterial) {
+    const kit = model.split('/')[0];
+    const brightness = WINDOW_BRIGHTNESS[kit];
+    if (brightness === undefined) return; // roads and props have no windows
+    const url = CITY_MODELS[model].url.replace(/[^/]+\.glb$/, 'Textures/colormap-night.png');
+    let map = this.nightMaps.get(url);
+    if (!map) {
+      map = new Texture(url, this.scene, false, false); // glTF textures aren't flipped
+      this.nightMaps.set(url, map);
+    }
+    let hash = 0;
+    for (let i = 0; i < model.length; i++) hash = (hash * 31 + model.charCodeAt(i)) >>> 0;
+    const tint = WINDOW_TINTS[hash % WINDOW_TINTS.length].scale(brightness);
+    material.emissiveTexture = map;
+    this.windowMaterials.set(material, tint);
+    this.applyWindows(material, tint);
   }
 
   /** Lots in their district's colour, flush with the sidewalks; grass all round the city. */
@@ -251,6 +413,7 @@ export class CityRenderer {
       box.receiveShadows = true;
       box.isPickable = false;
       this.meshes.add(box);
+      this.onMesh?.(box, 'ground');
     }
 
     if (outside) {
@@ -263,6 +426,7 @@ export class CityRenderer {
       ground.receiveShadows = true;
       ground.isPickable = false;
       this.meshes.add(ground);
+      this.onMesh?.(ground, 'ground');
     }
   }
 

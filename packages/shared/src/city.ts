@@ -63,6 +63,28 @@ export interface CitySpot {
   zone: CityZone;
 }
 
+/** A glowing neon tube, sign or billboard: an axis-aligned box (centre, half sizes) in one colour. */
+export interface CityNeon extends CityBox {
+  /** Index into CITY_NEON_COLORS. */
+  color: number;
+}
+
+/** A street lamp's head (where the light comes from) and the colour it shines. */
+export interface CityLight {
+  x: number;
+  y: number;
+  z: number;
+  /** Index into CITY_NEON_COLORS. */
+  color: number;
+}
+
+/** The night palette: hot pink, cyan, violet, red-pink, acid yellow, electric blue, sodium amber, warm white. */
+export const CITY_NEON_COLORS = ['#ff2bd6', '#19f0ff', '#9d4dff', '#ff3b6b', '#e8ff3b', '#2b7bff', '#ff9a3c', '#ffd9a0'] as const;
+const PINK = 0;
+const CYAN = 1;
+const AMBER = 6;
+const WARM = 7;
+
 export interface City {
   seed: number;
   /** World X/Z of the city's south-west (-X, -Z) corner. */
@@ -75,6 +97,8 @@ export interface City {
   blocks: CityBlock[];
   colliders: CityBox[];
   spots: CitySpot[];
+  neon: CityNeon[];
+  lights: CityLight[];
 }
 
 export interface CityOptions {
@@ -287,6 +311,10 @@ export function generateCity(options: CityOptions = {}): City {
   const objects: CityObject[] = [];
   const colliders: CityBox[] = [];
   const spots: CitySpot[] = [];
+  const neon: CityNeon[] = [];
+  const lights: CityLight[] = [];
+  // Signs get their own random sequence, so restyling them never moves a building.
+  const neonRng = seededRandom(seed ^ 0x9e3779b9);
   const centreX = cellX((bounds[1] + bounds[2]) / 2);
   const commercialHalf = ((bounds[2] - bounds[1]) * CITY_CELL) / 2;
 
@@ -323,7 +351,13 @@ export function generateCity(options: CityOptions = {}): City {
           const lx = alongX ? x : x + side * flip;
           const lz = alongX ? z + side * flip : z;
           const k = alongX ? (flip > 0 ? 0 : 2) : flip > 0 ? 1 : 3;
-          addSolid(ZONE_STYLE[zone].lamp, lx, lz, k, 0.15);
+          const lamp = ZONE_STYLE[zone].lamp;
+          addSolid(lamp, lx, lz, k, 0.15);
+          // The head hangs at the end of the arm, which reaches along -Z as authored.
+          const reach = -CITY_MODELS[lamp].min[2] * CITY_UNIT * 0.85;
+          const [ax, az] = [[0, -1], [-1, 0], [0, 1], [1, 0]][k];
+          const colour = zone === 'residential' ? AMBER : zone === 'industrial' ? (n % 8 === 0 ? CYAN : AMBER) : n % 8 === 0 ? PINK : CYAN;
+          lights.push({ x: lx + ax * reach, y: CITY_MODELS[lamp].max[1] * CITY_UNIT * 0.93, z: lz + az * reach, color: colour });
         }
       } else if (mask === 15 && zone === 'commercial') {
         // Traffic lights on the four corners, each facing the traffic coming toward it.
@@ -453,6 +487,7 @@ export function generateCity(options: CityOptions = {}): City {
       }
       taken.push(rect);
       addSolid(model, ox, oz, k);
+      addSigns(block.zone, model, rect, face);
       const gap = between(rng, style.gap[0], style.gap[1]);
       // A tree in the front garden, now and then.
       if (block.zone === 'residential' && rng() < 0.45) {
@@ -466,6 +501,61 @@ export function generateCity(options: CityOptions = {}): City {
         }
       }
       cursor += gap;
+    }
+  }
+
+  /**
+   * Neon on a building's street front: a tube over the shop fronts, a blade sign sticking out over the
+   * sidewalk, a billboard on the roof, and the outline of the tallest towers. Downtown gets most.
+   */
+  function addSigns(zone: CityZone, model: CityModelKey, rect: Rect, face: keyof typeof FACE) {
+    const r = neonRng;
+    const height = CITY_MODELS[model].max[1] * CITY_UNIT;
+    const base = KERB_HEIGHT;
+    const alongX = face === 'S' || face === 'N';
+    const out = face === 'S' || face === 'W' ? -1 : 1; // outward from the front, along Z or X
+    const front = face === 'S' ? rect.z0 : face === 'N' ? rect.z1 : face === 'W' ? rect.x0 : rect.x1;
+    const a0 = alongX ? rect.x0 : rect.z0;
+    const a1 = alongX ? rect.x1 : rect.z1;
+    const width = a1 - a0;
+    const colour = () => (zone === 'residential' ? pick(r, [PINK, CYAN, 2, WARM]) : intBetween(r, 0, 5));
+    /** A box given along-the-front centre/half length, height centre/half, and outward offset/half depth. */
+    const box = (along: number, halfAlong: number, y: number, hy: number, offset: number, halfOut: number, color: number) => {
+      const c = front + out * offset;
+      neon.push(
+        alongX
+          ? { x: along, y, z: c, hx: halfAlong, hy, hz: halfOut, color }
+          : { x: c, y, z: along, hx: halfOut, hy, hz: halfAlong, color },
+      );
+    };
+    const chance = zone === 'commercial' ? 1 : zone === 'industrial' ? 0.35 : 0.2;
+    // Tube over the ground floor.
+    if (r() < 0.85 * chance) box((a0 + a1) / 2, width * between(r, 0.25, 0.42), base + (zone === 'residential' ? 2.5 : 3.3), 0.09, 0.12, 0.06, colour());
+    if (zone !== 'commercial') return;
+    // Blade sign near one end, sticking out over the sidewalk.
+    if (height > 10 && r() < 0.65) {
+      const end = r() < 0.5 ? a0 + 1.2 : a1 - 1.2;
+      const tall = Math.min(between(r, 4, 9), height - 6);
+      box(end, 0.1, base + 4.5 + tall / 2, tall / 2, 0.55, 0.45, colour());
+    }
+    // A billboard on the roof of a mid-rise, facing the street.
+    if (height > 8 && height < 26 && r() < 0.3) {
+      const w = Math.min(width * 0.6, between(r, 5, 9));
+      box((a0 + a1) / 2, w / 2, base + height + 1.8, 1.4, -1.5, 0.12, colour());
+    }
+    // Towers: the roof line traced in light.
+    if (height > 26 && r() < 0.75) {
+      const c = colour();
+      const y = base + height - 0.25;
+      const t = 0.12;
+      const cx = (rect.x0 + rect.x1) / 2;
+      const cz = (rect.z0 + rect.z1) / 2;
+      const hx = (rect.x1 - rect.x0) / 2 + t;
+      const hz = (rect.z1 - rect.z0) / 2 + t;
+      neon.push({ x: cx, y, z: rect.z0 - t, hx, hy: t, hz: t, color: c });
+      neon.push({ x: cx, y, z: rect.z1 + t, hx, hy: t, hz: t, color: c });
+      neon.push({ x: rect.x0 - t, y, z: cz, hx: t, hy: t, hz, color: c });
+      neon.push({ x: rect.x1 + t, y, z: cz, hx: t, hy: t, hz, color: c });
     }
   }
 
@@ -510,6 +600,8 @@ export function generateCity(options: CityOptions = {}): City {
     blocks,
     colliders,
     spots,
+    neon,
+    lights,
   };
 }
 
@@ -533,6 +625,42 @@ function splitSpan(rng: Rng, from: number, to: number, size: [number, number]): 
   }
   return out;
 }
+
+/** The ground an object covers, metres (world X/Z), and its height. */
+export function cityObjectRect(o: CityObject) {
+  const k = Math.round(o.yaw / (Math.PI / 2)) & 3;
+  const b = turnedBounds(o.model, k);
+  return { x0: o.x + b.x0, x1: o.x + b.x1, z0: o.z + b.z0, z1: o.z + b.z1, height: b.height };
+}
+
+/** The road spot (centre of a straight tile) nearest a point. */
+export function nearestSpot(city: City, x: number, z: number, zone?: CityZone): CitySpot {
+  let best = city.spots[0];
+  let bestDistance = Infinity;
+  for (const s of city.spots) {
+    if (zone && s.zone !== zone) continue;
+    const d = (s.x - x) ** 2 + (s.z - z) ** 2;
+    if (d < bestDistance) {
+      best = s;
+      bestDistance = d;
+    }
+  }
+  return best;
+}
+
+/** Middle of the right-hand lane at a spot, facing along the road. */
+export function laneAt(spot: CitySpot) {
+  // Right of the direction of travel is -X when facing +Z.
+  return { x: spot.x - Math.cos(spot.heading) * LANE_OFFSET, z: spot.z + Math.sin(spot.heading) * LANE_OFFSET, heading: spot.heading };
+}
+
+/** Middle of the sidewalk on one side of a spot's road (side 1 = right of the direction of travel). */
+export function sidewalkAt(spot: CitySpot, side: 1 | -1 = 1) {
+  const d = (CITY_CELL / 2 - SIDEWALK / 2) * side;
+  return { x: spot.x - Math.cos(spot.heading) * d, y: KERB_HEIGHT, z: spot.z + Math.sin(spot.heading) * d, heading: spot.heading };
+}
+
+const LANE_OFFSET = 1.6;
 
 /** Which district a world X falls in. */
 export function cityZoneAt(city: City, x: number): CityZone | undefined {

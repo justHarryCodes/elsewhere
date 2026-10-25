@@ -16,6 +16,8 @@ import {
   type HumanBody,
   type VehicleModelKey,
 } from '@game/shared';
+import { CameraControls } from '../game/CameraControls';
+import { CityMap } from '../game/CityMap';
 import { type MoveMode, MovementSandbox, type SandboxPlace, type SandboxStats } from './movementSandbox';
 
 const ANIMATIONS = Object.entries(HUMAN_ANIMATIONS) as [HumanAnimation, (typeof HUMAN_ANIMATIONS)[HumanAnimation]][];
@@ -46,6 +48,7 @@ export function SandboxPage() {
   const [query, setQuery] = useState('');
   const [speedRatio, setSpeedRatio] = useState(1);
   const [showBounds, setShowBounds] = useState(false);
+  const [mapOpen, setMapOpen] = useState(false);
 
   useEffect(() => {
     const sandbox = new MovementSandbox(canvasRef.current!);
@@ -70,6 +73,26 @@ export function SandboxPage() {
   return (
     <div className="relative h-full w-full overflow-hidden bg-slate-900 text-slate-100">
       <canvas ref={canvasRef} className="block h-full w-full outline-none" />
+
+      <div className="absolute top-3 right-3 z-10">
+        <CameraControls
+          view={stats?.view ?? 'chase'}
+          night={stats?.night ?? true}
+          onView={(view) => sandbox()?.setCameraView(view)}
+          onRotate={(radians) => sandbox()?.rotateCamera(radians)}
+          onZoom={(factor) => sandbox()?.zoomCamera(factor)}
+          onMap={() => setMapOpen((open) => !open)}
+          onNight={(night) => sandbox()?.setNight(night)}
+        />
+      </div>
+      {mapOpen && sandboxRef.current && (
+        <CityMap
+          city={sandboxRef.current.cityPlan}
+          player={() => sandbox()?.mapPlayer()}
+          onNavigate={(x, z) => sandbox()?.navigateTo(x, z)}
+          onClose={() => setMapOpen(false)}
+        />
+      )}
 
       {stats?.loading && (
         <div className="absolute inset-0 grid place-items-center bg-slate-950/60 text-sm">

@@ -1,7 +1,7 @@
 import { useEffect, useRef } from "react";
 import * as THREE from "three";
 import { OrbitControls } from "three/addons/controls/OrbitControls.js";
-import { generateCity, toHumanAnimation, toHumanBody } from "@game/shared";
+import { type City, toHumanAnimation, toHumanBody } from "@game/shared";
 import type { PlayersRef } from "../../net/useGameRoom";
 import { approachAngle, smoothing } from "../smoothing";
 import {
@@ -19,11 +19,11 @@ const CAMERA_AZIMUTH = 0; // horizontal angle (0 = behind the player, on the +Z 
 export function ThreeScene({
   players,
   selfId,
-  citySeed,
+  city: cityPlan,
 }: {
   players: PlayersRef;
   selfId?: string;
-  citySeed: number;
+  city: City;
 }) {
   const containerRef = useRef<HTMLDivElement>(null);
 
@@ -57,7 +57,7 @@ export function ThreeScene({
     let city: CityRenderer | undefined;
     let disposed = false;
     // The same city the server collides against, from the room's seed.
-    CityRenderer.create(generateCity({ seed: citySeed }))
+    CityRenderer.create(cityPlan)
       .then((loaded) => {
         if (disposed) return loaded.dispose();
         city = loaded;
@@ -167,7 +167,7 @@ export function ThreeScene({
       renderer.dispose();
       renderer.domElement.remove();
     };
-  }, [players, selfId, citySeed]);
+  }, [players, selfId, cityPlan]);
 
   return <div ref={containerRef} className="h-full w-full" />;
 }

@@ -11,7 +11,10 @@ import {
   KERB_HEIGHT,
   Messages,
   PLAYER_SPEED,
+  TeleportMessage,
   generateCity,
+  nearestSpot,
+  sidewalkAt,
   isHumanAnimation,
   isHumanBody,
   locomotionForSpeed,
@@ -45,6 +48,17 @@ export class GameRoom extends Room<GameState> {
 
     this.onMessage(Messages.Input, (client, message: InputMessage) => {
       this.inputs.set(client.sessionId, sanitizeInput(message));
+    });
+
+    this.onMessage(Messages.Teleport, (client, message: TeleportMessage) => {
+      const entry = this.walkers.get(client.sessionId);
+      const player = this.state.players.get(client.sessionId);
+      if (!entry || !player || !Number.isFinite(message?.x) || !Number.isFinite(message?.z)) return;
+      // Always onto a sidewalk, never inside a building or out of town.
+      const to = sidewalkAt(nearestSpot(this.city, message.x, message.z));
+      entry.walker.body.setTranslation(to, true);
+      entry.velocityY = 0;
+      Object.assign(player, { x: to.x, y: to.y, z: to.z, heading: to.heading });
     });
 
     this.onMessage(Messages.Action, (client, message: ActionMessage) => {

@@ -38,7 +38,11 @@ import {
   type City,
   type CityZone,
   generateCity,
+  laneAt,
+  nearestSpot,
 } from '@game/shared';
+import { Atmosphere } from '../game/babylon/atmosphere';
+import type { CameraView } from '../game/CameraControls';
 import { CityRenderer } from '../game/babylon/city';
 import { type HumanCharacter, HumanLibrary } from '../game/babylon/humans';
 import { measureNode } from '../game/babylon/realScale';
@@ -70,6 +74,7 @@ export interface SandboxStats {
   /** Close enough to the car to get in with E. */
   nearVehicle: boolean;
   night: boolean;
+  view: CameraView;
 }
 
 const MOVE_SPEEDS: Record<MoveMode, number> = {
@@ -88,6 +93,12 @@ const GROUND_SIZE = 200;
 // The city starts just north of the test yard's ground and is centred on it east-west.
 const CITY_ORIGIN = { x: -500, z: GROUND_SIZE / 2 + 4 };
 const LANE_OFFSET = 1.6; // metres from a road's centre line to the middle of the right-hand lane
+// Camera distance and angle from straight up for each view.
+const SANDBOX_VIEWS: Record<CameraView, { radius: number; beta: number }> = {
+  street: { radius: 3.5, beta: 1.42 },
+  chase: { radius: 7, beta: 1.2 },
+  overhead: { radius: 70, beta: 0.3 },
+};
 const SHADOW_RANGE = 90; // metres of shadow round the camera
 const CAMERA_TARGET_HEIGHT = 1.1;
 const DRIVING_CAMERA_RADIUS = 9;
@@ -111,8 +122,9 @@ type Boarding =
   | { phase: 'opening'; left: number }
   | { phase: 'vanishing' | 'appearing'; t: number };
 
-const DAY = { sky: new Color4(0.55, 0.7, 0.85, 1), hemi: 0.7, sun: 1.6, env: 1, ground: new Color3(0.42, 0.5, 0.42) };
-const NIGHT = { sky: new Color4(0.02, 0.03, 0.07, 1), hemi: 0.06, sun: 0.04, env: 0.05, ground: new Color3(0.3, 0.33, 0.36) };
+// The test yard's floor; sky, fog and lights come from the shared Atmosphere.
+const GROUND_DAY = new Color3(0.42, 0.5, 0.42);
+const GROUND_NIGHT = new Color3(0.22, 0.2, 0.3);
 
 // Real-size props from the scale catalog, placed around the spawn to judge proportions.
 const REFERENCES: { key: SizeKey; label: string; x: number; z: number; color: string }[] = [
@@ -136,6 +148,8 @@ export class MovementSandbox {
   private disposed = false;
   // The zoom the player chose, and the radius last set here (pulled in when a wall is in the way).
   private preferredRadius = 6;
+  private view: CameraView = 'chase';
+  private cameraGoal?: { radius?: number; beta?: number; alpha?: number };
   private appliedRadius = 6;
 
   private body: HumanBody = 'male';
@@ -152,6 +166,7 @@ export class MovementSandbox {
   private error?: string;
 
   private readonly hemi: HemisphericLight;
+  private readonly atmosphere: Atmosphere;
   private readonly glow: GlowLayer;
   private readonly sun: DirectionalLight;
   private groundMaterial?: StandardMaterial;
@@ -171,7 +186,7 @@ export class MovementSandbox {
 
     this.camera = new ArcRotateCamera('camera', Math.PI / 2, Math.PI / 2.6, 6, new Vector3(0, CAMERA_TARGET_HEIGHT, 0), this.scene);
     this.camera.lowerRadiusLimit = 1.5;
-    this.camera.upperRadiusLimit = 40;
+    this.camera.upperRadiusLimit = 120;
     this.camera.upperBetaLimit = Math.PI / 2 - 0.05;
     this.camera.wheelDeltaPercentage = 0.02;
     // Arrow keys move the character, not the camera.
@@ -179,10 +194,8 @@ export class MovementSandbox {
     this.camera.attachControl(canvas, true);
 
     this.hemi = new HemisphericLight('hemi', new Vector3(0, 1, 0), this.scene);
-    this.hemi.intensity = DAY.hemi;
     this.sun = new DirectionalLight('sun', new Vector3(-0.4, -1, -0.6), this.scene);
     this.sun.position = new Vector3(20, 40, 30);
-    this.sun.intensity = DAY.sun;
     // Shadows cover the area round the camera (see update), not everything that casts one: across a
     // kilometre of city a 2048 map would be too coarse to show anything.
     this.sun.autoUpdateExtends = false;
@@ -196,30 +209,30 @@ export class MovementSandbox {
     this.glow.intensity = 0.9;
     // Sky reflections: metallic and clear-coated paint (and every glTF material) light from this.
     this.scene.environmentTexture = new HDRCubeTexture('/assets/environment/sky.hdr', this.scene, 256, false, true, false, true);
-    this.scene.environmentIntensity = DAY.env;
+    this.atmosphere = new Atmosphere(this.scene, this.camera, this.hemi, this.sun);
 
     this.createGround();
     this.createReferences();
-    this.scene.fogMode = Scene.FOGMODE_EXP2;
-    this.scene.fogDensity = 0.003; // thick enough to soften where the city is building in
-    this.scene.fogColor = new Color3(DAY.sky.r, DAY.sky.g, DAY.sky.b);
 
     this.city = generateCity({ seed: CITY_SEED, origin: CITY_ORIGIN });
-    // Built in chunks round the camera as you go (see update). Street lamps don't glow yet, and
-    // leaving the city out of the glow pass halves its cost.
+    // Built in chunks round the camera as you go (see update). Only the neon and lamps go through the
+    // glow layer: they're what should bloom, and leaving the rest out halves its cost.
     this.cityRenderer = CityRenderer.create(this.scene, this.city, {
       outsideGround: true,
-      onMesh: (mesh) => {
+      onMesh: (mesh, kind) => {
+        if (kind === 'neon' || kind === 'lamp') return;
         this.glow.addExcludedMesh(mesh);
         mesh.onDisposeObservable.addOnce(() => this.glow.removeExcludedMesh(mesh));
       },
     });
-    for (const mesh of this.cityRenderer.meshes) this.glow.addExcludedMesh(mesh);
+    // The city's own look is night: neon, lit windows, purple haze.
+    this.setNight(true);
 
     SandboxVehicle.create(this.scene, this.shadows, REFERENCES.map(referenceBlock), this.city)
       .then((vehicle) => {
-        if (this.disposed) vehicle.dispose();
-        else this.vehicle = vehicle;
+        if (this.disposed) return vehicle.dispose();
+        this.vehicle = vehicle;
+        if (this.night) vehicle.setHeadlights('low');
       })
       .catch((error: unknown) => {
         if (this.disposed) return; // the scene went away mid-load; nothing to report
@@ -324,37 +337,89 @@ export class MovementSandbox {
    * nearby street and the character on the sidewalk beside it (or still at the wheel if driving).
    */
   teleport(place: SandboxPlace) {
-    if (!this.character) return;
-    let car: { x: number; z: number; heading: number };
     if (place === 'yard') {
-      car = { x: -4, z: 6, heading: 0 };
-    } else {
-      const district = this.city.districts.find((d) => d.zone === place)!;
-      const cx = (district.x0 + district.x1) / 2;
-      const cz = (this.city.bounds.z0 + this.city.bounds.z1) / 2;
-      const spot = this.city.spots
-        .filter((s) => s.zone === place)
-        .reduce((best, s) => (Math.hypot(s.x - cx, s.z - cz) < Math.hypot(best.x - cx, best.z - cz) ? s : best));
-      // Right of the direction of travel is -X when facing +Z.
-      car = {
-        x: spot.x - Math.cos(spot.heading) * LANE_OFFSET,
-        z: spot.z + Math.sin(spot.heading) * LANE_OFFSET,
-        heading: spot.heading,
-      };
+      this.travel({ x: -4, z: 6, heading: 0 }, 2.6, 0);
+      return;
     }
+    const district = this.city.districts.find((d) => d.zone === place)!;
+    const cx = (district.x0 + district.x1) / 2;
+    const cz = (this.city.bounds.z0 + this.city.bounds.z1) / 2;
+    this.navigateTo(cx, cz, place);
+  }
+
+  /** Goes to the street nearest a point (e.g. one clicked on the map). */
+  navigateTo(x: number, z: number, zone?: CityZone) {
+    const spot = nearestSpot(this.city, x, z, zone);
+    this.travel(laneAt(spot), CITY_CELL / 2 - LANE_OFFSET - 0.5, KERB_HEIGHT);
+  }
+
+  /** The car to `car` (driver and all, if driving); on foot, the character beside it to its right. */
+  private travel(car: { x: number; z: number; heading: number }, side: number, groundY: number) {
+    if (!this.character) return;
     if (this.driving || this.boarding) {
       void this.rebuildVehicle((vehicle) => vehicle.respawn(car));
       return;
     }
     const root = this.character.root;
-    // On the sidewalk to the car's right (or beside it in the yard), facing the same way.
-    const side = place === 'yard' ? 2.6 : CITY_CELL / 2 - LANE_OFFSET - 0.5;
-    root.position.set(car.x - Math.cos(car.heading) * side, place === 'yard' ? 0 : KERB_HEIGHT, car.z + Math.sin(car.heading) * side);
+    root.position.set(car.x - Math.cos(car.heading) * side, groundY, car.z + Math.sin(car.heading) * side);
     root.rotation.set(0, car.heading, 0);
     this.vehicle?.placeWalker(root.position);
     this.velocityY = 0;
     this.camera.target.copyFrom(root.position.add(new Vector3(0, CAMERA_TARGET_HEIGHT, 0)));
     if (this.vehicle) void this.vehicle.respawn(car);
+  }
+
+  get cityPlan(): City {
+    return this.city;
+  }
+
+  /** Where you are for the map: the car while driving, else the character. */
+  mapPlayer(): { x: number; z: number; heading: number } | undefined {
+    if (this.driving && this.vehicle?.root) {
+      const p = this.vehicle.root.position;
+      return { x: p.x, z: p.z, heading: this.vehicle.heading };
+    }
+    const root = this.character?.root;
+    return root && { x: root.position.x, z: root.position.z, heading: root.rotation.y };
+  }
+
+  // ------------------------------------------------------------------ camera controls
+
+  setCameraView(view: CameraView) {
+    this.view = view;
+    const goal = SANDBOX_VIEWS[view];
+    this.cameraGoal = { radius: view === 'chase' && this.driving ? DRIVING_CAMERA_RADIUS : goal.radius, beta: goal.beta };
+  }
+
+  rotateCamera(radians: number) {
+    this.cameraGoal = { ...this.cameraGoal, alpha: (this.cameraGoal?.alpha ?? this.camera.alpha) + radians };
+  }
+
+  zoomCamera(factor: number) {
+    const camera = this.camera;
+    const radius = Math.min(camera.upperRadiusLimit ?? 200, Math.max(camera.lowerRadiusLimit ?? 1, this.preferredRadius * factor));
+    this.cameraGoal = { ...this.cameraGoal, radius };
+  }
+
+  /** Eases the camera toward a chosen view, turn or zoom. */
+  private easeCamera(dt: number) {
+    const goal = this.cameraGoal;
+    if (!goal) return;
+    const k = 1 - Math.exp(-6 * dt);
+    let done = true;
+    if (goal.radius !== undefined) {
+      this.preferredRadius += (goal.radius - this.preferredRadius) * k;
+      done &&= Math.abs(goal.radius - this.preferredRadius) < 0.05;
+    }
+    if (goal.beta !== undefined) {
+      this.camera.beta += (goal.beta - this.camera.beta) * k;
+      done &&= Math.abs(goal.beta - this.camera.beta) < 0.005;
+    }
+    if (goal.alpha !== undefined) {
+      this.camera.alpha += (goal.alpha - this.camera.alpha) * k;
+      done &&= Math.abs(goal.alpha - this.camera.alpha) < 0.005;
+    }
+    if (done) this.cameraGoal = undefined;
   }
 
   setVehicleModel(model: VehicleModelKey) {
@@ -464,13 +529,9 @@ export class MovementSandbox {
 
   setNight(night: boolean) {
     this.night = night;
-    const look = night ? NIGHT : DAY;
-    this.scene.clearColor = look.sky;
-    this.hemi.intensity = look.hemi;
-    this.sun.intensity = look.sun;
-    this.scene.environmentIntensity = look.env;
-    this.groundMaterial?.diffuseColor.copyFrom(look.ground);
-    this.scene.fogColor.set(look.sky.r, look.sky.g, look.sky.b);
+    this.atmosphere.set(night);
+    this.cityRenderer.setNight(night);
+    this.groundMaterial?.diffuseColor.copyFrom(night ? GROUND_NIGHT : GROUND_DAY);
     // Nobody drives at night with the lights off.
     if (night && this.vehicle?.getStats(this.driving).headlights === 'off') this.vehicle.setHeadlights('low');
   }
@@ -506,6 +567,7 @@ export class MovementSandbox {
       boarding: !!this.boarding,
       nearVehicle: !this.driving && !this.boarding && this.isNearVehicle(),
       night: this.night,
+      view: this.view,
     };
   }
 
@@ -539,6 +601,7 @@ export class MovementSandbox {
   }
 
   private update(dt: number) {
+    this.atmosphere.follow(this.camera.target);
     this.cityRenderer.update(this.camera.target, dt);
     // Keep the shadow-casting sun over the camera.
     this.sun.position.copyFrom(this.camera.target.subtract(this.sun.direction.normalizeToNew().scale(150)));
@@ -616,6 +679,7 @@ export class MovementSandbox {
    */
   private keepCameraClear(dt: number) {
     const camera = this.camera;
+    this.easeCamera(dt);
     if (Math.abs(camera.radius - this.appliedRadius) > 1e-3) this.preferredRadius = camera.radius; // zoomed
     const dir = camera.position.subtract(camera.target);
     if (!this.vehicle || dir.lengthSquared() < 1e-6) return;
@@ -770,7 +834,6 @@ export class MovementSandbox {
       if (event.code === 'KeyE') this.toggleVehicle();
       if (event.code === 'KeyL') this.vehicle?.cycleHeadlights();
       if (event.code === 'KeyK') this.vehicle?.setSiren(!this.vehicle.getStats(this.driving).siren);
-      if (event.code === 'KeyN') this.setNight(!this.night);
     }
     this.keys.add(event.code);
     if (event.code === 'ShiftLeft' || event.code === 'ShiftRight') this.moveMode = 'sprint';
@@ -788,7 +851,7 @@ export class MovementSandbox {
   private createGround() {
     const ground = MeshBuilder.CreateGround('ground', { width: GROUND_SIZE, height: GROUND_SIZE }, this.scene);
     const material = new StandardMaterial('ground-mat', this.scene);
-    material.diffuseColor = DAY.ground.clone();
+    material.diffuseColor = GROUND_DAY.clone();
     material.specularColor = Color3.Black();
     ground.material = material;
     this.groundMaterial = material;

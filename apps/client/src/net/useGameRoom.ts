@@ -9,6 +9,7 @@ import {
   type InputMessage,
   type JoinOptions,
   type PlayerSnapshot,
+  type TeleportMessage,
 } from '@game/shared';
 
 export type ConnectionStatus = 'connecting' | 'connected' | 'disconnected' | 'error';
@@ -82,5 +83,9 @@ export function useGameRoom(options: JoinOptions = {}) {
     roomRef.current?.send(Messages.Action, { animation } satisfies ActionMessage);
   }, []);
 
-  return { status, players: players as PlayersRef, playerIds, sessionId, citySeed, sendInput, sendAction };
+  const sendTeleport = useCallback((x: number, z: number) => {
+    roomRef.current?.send(Messages.Teleport, { x, z } satisfies TeleportMessage);
+  }, []);
+
+  return { status, players: players as PlayersRef, playerIds, sessionId, citySeed, sendInput, sendAction, sendTeleport };
 }

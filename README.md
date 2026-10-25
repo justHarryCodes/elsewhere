@@ -100,6 +100,15 @@ The header toggle switches between the Babylon.js and Three.js renderers.
   within 220 m are built nearest first, one at a time, rising out of the ground; chunks more than 300 m behind sink
   away and are freed. Models are loaded the first time a chunk needs them, and every copy is an instance. (The
   Three.js renderer, `game/three/city.ts`, still draws the whole city at once.)
+- **Cyberpunk nights** (the default; **N** or the ☾/☀ button switches): a violet sky and purple haze, windows lit
+  from each kit's night map (`Textures/colormap-night.png`, made by `scripts/city/make_night_maps.py` from the window
+  glass colours), neon tubes over shop fronts, blade signs, rooftop billboards and tower outlines (`city.neon`,
+  generated with the city), street lamps in cyan, pink and amber throwing pools of light (`city.lights`), and a soft
+  light over the player. `game/babylon/atmosphere.ts` holds the day and night looks: lights, fog, bloom, contrast,
+  vignette and a little chromatic aberration.
+- **Camera and map** (`game/CameraControls.tsx`, `game/CityMap.tsx`, in the game and the sandbox): Street / Chase /
+  Top views (**V** cycles), turn and zoom buttons, and a neon city map (**M**): click anywhere on it to go to the
+  nearest street. In the game the server moves you (`Messages.Teleport`), always onto a sidewalk.
 - In `/sandbox` the city sits just north of the test yard; the **City** buttons jump to the yard or a district with
   the car parked beside you.
 

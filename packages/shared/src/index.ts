@@ -17,6 +17,7 @@ export const PLAYER_SPEED = HUMAN_METRICS.runSpeed; // metres per second
 export const Messages = {
   Input: 'input',
   Action: 'action',
+  Teleport: 'teleport',
 } as const;
 
 /** Movement direction on the ground plane, each axis in [-1, 1]. */
@@ -28,6 +29,12 @@ export interface InputMessage {
 /** Ask the server to play an animation (emote, attack, ...). Moving cancels it. */
 export interface ActionMessage {
   animation: HumanAnimation;
+}
+
+/** Go to the street nearest this point (from clicking the city map). */
+export interface TeleportMessage {
+  x: number;
+  z: number;
 }
 
 export interface JoinOptions {
