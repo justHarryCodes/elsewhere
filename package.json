@@ -1,0 +1,27 @@
+{
+  "name": "web-game",
+  "private": true,
+  "version": "0.1.0",
+  "workspaces": [
+    "packages/*",
+    "apps/*"
+  ],
+  "engines": {
+    "node": ">=20"
+  },
+  "scripts": {
+    "build:shared": "npm run build -w @game/shared",
+    "dev": "npm run build:shared && concurrently -n shared,server,client -c gray,blue,green \"npm run dev -w @game/shared\" \"npm run dev -w @game/server\" \"npm run dev -w @game/client\"",
+    "sandbox": "npm run build:shared && npm run dev -w @game/client -- --open /sandbox",
+    "build": "npm run build:shared && npm run build -w @game/server && npm run build -w @game/client",
+    "start": "npm run start -w @game/server",
+    "typecheck": "npm run build:shared && npm run typecheck --workspaces --if-present"
+  },
+  "devDependencies": {
+    "concurrently": "^9.1.2",
+    "typescript": "^5.8.3"
+  },
+  "dependencies": {
+    "@dimforge/rapier3d-compat": "^0.21.0"
+  }
+}

@@ -1,0 +1,369 @@
+/**
+ * physics-vehicle.ts  -  drivable 4-wheel vehicles on Rapier's DynamicRayCastVehicleController.
+ *
+ * Sizes come from your catalog (vehicle.sedan, vehicle.bus, ...), masses from MASS_KG, tire grip from
+ * the surface the wheel is touching (SURFACES friction: ice = slippery, asphalt = grippy).
+ * Authoritative on the SERVER. The client may run it for the local driver (prediction) only.
+ *
+ * Conventions: chassis forward = +X, up = +Y, right = +Z. Wheel order: 0 front-left, 1 front-right,
+ * 2 rear-left, 3 rear-right.
+ *
+ * Driving input reuses the player's PlayerInput, so no new network message is needed:
+ *   while driving:  input.z = throttle (+forward / -reverse), input.x = steer (+right), input.jump = handbrake
+ *   on foot:        input.x / input.z = movement direction (as before)
+ */
+import type RAPIER from "@dimforge/rapier3d-compat";
+import { RULES, type Sim, type Vec3 } from "./physics-core";
+import * as C from "./physics-config";
+import { sizeInUnits } from "./scale";
+
+// ------------------------------------------------------------------ TYPES
+export interface VehicleInput {
+  throttle: number; // -1..1
+  steer: number; // -1 (left) .. 1 (right)
+  handbrake: boolean;
+}
+
+export interface WheelSnapshot {
+  steer: number; // radians, apply to the wheel mesh's yaw
+  rot: number; // radians, rolling angle around the axle
+  susp: number; // current suspension length (m), for wheel height
+  contact: boolean;
+}
+
+export interface VehicleState {
+  controller: RAPIER.DynamicRayCastVehicleController;
+  spec: C.VehicleSpec;
+  mass: number;
+  halfLength: number;
+  halfWidth: number;
+  steer: number; // smoothed steering input, -1..1
+  driver: string | null;
+  input: VehicleInput | null; // direct control (AI / tests). null = use the driver's PlayerInput
+  speed: number; // signed forward speed, m/s
+  wheels: WheelSnapshot[];
+  driven: number[]; // wheel indices that receive engine force
+}
+
+const IDLE: VehicleInput = { throttle: 0, steer: 0, handbrake: false };
+
+/** Calibrated so that steer > 0 turns toward +Z (right) when moving forward. */
+const STEER_SIGN = -1;
+
+const clamp = (v: number, lo: number, hi: number) =>
+  Math.min(hi, Math.max(lo, v));
+const lerp = (a: number, b: number, t: number) => a + (b - a) * t;
+
+function rotate(
+  q: { x: number; y: number; z: number; w: number },
+  v: Vec3,
+): Vec3 {
+  const cx = q.y * v.z - q.z * v.y + q.w * v.x;
+  const cy = q.z * v.x - q.x * v.z + q.w * v.y;
+  const cz = q.x * v.y - q.y * v.x + q.w * v.z;
+  return {
+    x: v.x + 2 * (q.y * cz - q.z * cy),
+    y: v.y + 2 * (q.z * cx - q.x * cz),
+    z: v.z + 2 * (q.x * cy - q.y * cx),
+  };
+}
+
+// ------------------------------------------------------------------ SPAWN
+/** Spawn a drivable vehicle from the catalog. `pos` is the point on the ground under it; `yaw` in radians. */
+export function addVehicle(
+  sim: Sim,
+  id: string,
+  key: C.VehicleKey,
+  pos: Vec3,
+  yaw = 0,
+): RAPIER.RigidBody {
+  const { RAPIER, world } = sim;
+  const spec = C.getVehicleSpec(key);
+  const size = sizeInUnits(key);
+  const mass = C.massFor(key, "metal");
+  const clearance = C.VEHICLE.clearance;
+
+  // chassis box: catalog height minus ground clearance (the wheels fill the gap)
+  const hx = size.length / 2;
+  const hy = (size.height - clearance) / 2;
+  const hz = size.width / 2;
+
+  const body = world.createRigidBody(
+    RAPIER.RigidBodyDesc.dynamic()
+      .setTranslation(pos.x, pos.y + clearance + hy + 0.1, pos.z)
+      .setRotation({ x: 0, y: Math.sin(yaw / 2), z: 0, w: Math.cos(yaw / 2) })
+      .setLinearDamping(0.0)
+      .setAngularDamping(0.3)
+      .setCcdEnabled(true),
+  );
+
+  // Real mass, LOW centre of mass (engine + floor pan) so the car resists rolling over.
+  const L = size.length;
+  const H = hy * 2;
+  const W = size.width;
+  world.createCollider(
+    RAPIER.ColliderDesc.cuboid(hx, hy, hz)
+      .setFriction(0.3)
+      .setRestitution(0.05)
+      .setMassProperties(
+        mass,
+        { x: 0, y: -hy * 0.4, z: 0 },
+        {
+          x: (mass / 12) * (H * H + W * W),
+          y: (mass / 12) * (L * L + W * W),
+          z: (mass / 12) * (L * L + H * H),
+        },
+        { x: 0, y: 0, z: 0, w: 1 },
+      ),
+    body,
+  );
+
+  // ---- wheels (raycast suspension)
+  const cc = world.createVehicleController(body);
+  cc.indexUpAxis = 1; // Y
+  cc.setIndexForwardAxis = 0; // X
+  const r = spec.wheelRadius;
+  const wheelbase = size.length * spec.wheelbaseRatio;
+  const trackHalf = size.width / 2 - 0.12;
+  const restLen = Math.max(0.15, r * 0.7);
+  // springs sag under the vehicle's weight: static compression = g / (4 * stiffness) for 4 wheels.
+  // Raise the mounts by that much so the chassis really sits `clearance` above the ground.
+  const sag = Math.abs(RULES.GRAVITY) / (4 * C.VEHICLE.suspensionStiffness);
+  const connY = -hy + restLen + r - clearance - sag;
+  const layout: [number, number][] = [
+    [wheelbase / 2, -trackHalf], // FL
+    [wheelbase / 2, trackHalf], //  FR
+    [-wheelbase / 2, -trackHalf], // RL
+    [-wheelbase / 2, trackHalf], //  RR
+  ];
+  layout.forEach(([x, z], i) => {
+    cc.addWheel(
+      { x, y: connY, z },
+      { x: 0, y: -1, z: 0 },
+      { x: 0, y: 0, z: 1 },
+      restLen,
+      r,
+    );
+    cc.setWheelMaxSuspensionTravel(i, restLen * 0.8);
+    cc.setWheelSuspensionStiffness(i, C.VEHICLE.suspensionStiffness);
+    cc.setWheelSuspensionCompression(i, C.VEHICLE.suspensionCompression);
+    cc.setWheelSuspensionRelaxation(i, C.VEHICLE.suspensionRelaxation);
+    cc.setWheelMaxSuspensionForce(i, mass * Math.abs(RULES.GRAVITY) * 2);
+    cc.setWheelSideFrictionStiffness(i, 1.0);
+    cc.setWheelFrictionSlip(
+      i,
+      spec.grip * C.VEHICLE.tireFriction * 0.8 * C.VEHICLE.frictionSlipScale,
+    );
+  });
+
+  const driven =
+    spec.drive === "fwd"
+      ? [0, 1]
+      : spec.drive === "rwd"
+        ? [2, 3]
+        : [0, 1, 2, 3];
+  const state: VehicleState = {
+    controller: cc,
+    spec,
+    mass,
+    halfLength: hx,
+    halfWidth: hz,
+    steer: 0,
+    driver: null,
+    input: null,
+    speed: 0,
+    wheels: layout.map(() => ({
+      steer: 0,
+      rot: 0,
+      susp: restLen,
+      contact: false,
+    })),
+    driven,
+  };
+
+  sim.bodies.set(id, {
+    body,
+    kind: "vehicle",
+    key,
+    cd: C.dragCoefficient(key),
+    area: C.frontalArea(key),
+    half: hy,
+    vehicle: state,
+  });
+  return body;
+}
+
+// ------------------------------------------------------------------ PER-TICK UPDATE (call BEFORE world.step)
+function readInput(sim: Sim, v: VehicleState): VehicleInput {
+  if (v.input) return v.input;
+  if (!v.driver) return IDLE;
+  const pi = sim.bodies.get(v.driver)?.input;
+  if (!pi) return IDLE;
+  return { throttle: pi.z, steer: pi.x, handbrake: pi.jump };
+}
+
+export function stepVehicles(sim: Sim): void {
+  const { RAPIER } = sim;
+  const dt = RULES.DT;
+  const g = Math.abs(RULES.GRAVITY);
+  const rayGroups = C.groups(0xffff, C.LAYER.STATIC | C.LAYER.DYNAMIC); // wheels ignore players, bullets, triggers
+
+  for (const e of sim.bodies.values()) {
+    const v = e.vehicle;
+    if (e.kind !== "vehicle" || !v) continue;
+    const cc = v.controller;
+    const spec = v.spec;
+    const inp = readInput(sim, v);
+    const parked = v.driver === null && !v.input;
+    const speed = cc.currentVehicleSpeed();
+    v.speed = speed;
+
+    // ---- steering: smoothed, and less angle at speed (stability)
+    const maxStep = C.VEHICLE.steerRate * dt;
+    v.steer += clamp(clamp(inp.steer, -1, 1) - v.steer, -maxStep, maxStep);
+    const maxAngle =
+      (lerp(
+        spec.maxSteerDeg,
+        spec.minSteerDeg,
+        clamp(Math.abs(speed) / spec.topSpeed, 0, 1),
+      ) *
+        Math.PI) /
+      180;
+    const wheelAngle = STEER_SIGN * v.steer * maxAngle;
+
+    // ---- engine / brake forces (Newtons, total for the vehicle)
+    const th = clamp(inp.throttle, -1, 1);
+    const maxEngine = v.mass * spec.accel;
+    const maxBrake = v.mass * spec.brakeDecel;
+    let engine = 0;
+    let brake = 0;
+    if (parked) {
+      brake = maxBrake * 0.5; // parking brake
+    } else if (
+      th !== 0 &&
+      Math.abs(speed) > 0.5 &&
+      Math.sign(th) !== Math.sign(speed)
+    ) {
+      brake = Math.abs(th) * maxBrake; // pushing against motion = brake
+    } else if (th !== 0) {
+      const top = th > 0 ? spec.topSpeed : spec.reverseTopSpeed;
+      engine = th * maxEngine * clamp(1 - Math.abs(speed) / top, 0, 1); // power fades toward top speed
+    } else {
+      brake = C.VEHICLE.rollingResistance * v.mass * g; // coasting
+    }
+
+    for (let i = 0; i < 4; i++) {
+      const rear = i >= 2;
+      const hb = inp.handbrake && rear;
+      cc.setWheelSteering(i, rear ? 0 : wheelAngle);
+      cc.setWheelEngineForce(
+        i,
+        hb || !v.driven.includes(i) ? 0 : engine / v.driven.length,
+      );
+      // Rapier's wheel brake is an IMPULSE per step (measured), so Newtons * dt
+      cc.setWheelBrake(i, (hb ? maxBrake / 2 : brake / 4) * dt);
+
+      // tire grip = tire * what the wheel is standing on (ice vs asphalt)
+      const ground = cc.wheelGroundObject(i);
+      const surfaceMu = ground ? ground.friction() : 0.8;
+      let slip = spec.grip * C.VEHICLE.tireFriction * surfaceMu;
+      if (hb) slip *= C.VEHICLE.handbrakeRearGrip;
+      cc.setWheelFrictionSlip(i, slip * C.VEHICLE.frictionSlipScale);
+    }
+
+    cc.updateVehicle(dt, RAPIER.QueryFilterFlags.EXCLUDE_SENSORS, rayGroups);
+
+    // ---- data for rendering the wheels on the client
+    for (let i = 0; i < 4; i++) {
+      const w = v.wheels[i];
+      w.steer = cc.wheelSteering(i) ?? 0;
+      w.rot = cc.wheelRotation(i) ?? 0;
+      w.susp = cc.wheelSuspensionLength(i) ?? w.susp;
+      w.contact = cc.wheelIsInContact(i);
+    }
+
+    // ---- the driver rides along (hidden physics body follows the chassis)
+    if (v.driver) {
+      const d = sim.bodies.get(v.driver);
+      if (d) d.body.setTranslation(e.body.translation(), false);
+    }
+  }
+}
+
+// ------------------------------------------------------------------ ENTER / EXIT
+/** Put a player in the driver seat. Server-side check: must be close enough. */
+export function enterVehicle(
+  sim: Sim,
+  vehicleId: string,
+  playerId: string,
+): boolean {
+  const ve = sim.bodies.get(vehicleId);
+  const pe = sim.bodies.get(playerId);
+  const v = ve?.vehicle;
+  if (!ve || !v || !pe) return false;
+  if (pe.kind !== "player" && pe.kind !== "kinplayer") return false;
+  if (v.driver !== null || pe.inVehicle) return false;
+  const a = ve.body.translation();
+  const b = pe.body.translation();
+  if (
+    Math.hypot(a.x - b.x, a.y - b.y, a.z - b.z) >
+    v.halfLength + C.VEHICLE.enterDistance
+  )
+    return false;
+
+  pe.body.setEnabled(false); // no collisions or physics while seated
+  pe.inVehicle = vehicleId;
+  pe.input = { x: 0, z: 0, jump: false };
+  pe.vy = 0;
+  sim.fallState.set(playerId, { vy: 0, grounded: true });
+  v.driver = playerId;
+  return true;
+}
+
+/** Step the driver out on the left (driver) side. Returns false if the player isn't driving. */
+export function exitVehicle(sim: Sim, playerId: string): boolean {
+  const pe = sim.bodies.get(playerId);
+  const ve = pe?.inVehicle ? sim.bodies.get(pe.inVehicle) : undefined;
+  const v = ve?.vehicle;
+  if (!pe || !ve || !v) return false;
+
+  const t = ve.body.translation();
+  const q = ve.body.rotation();
+  const side = rotate(q, {
+    x: 0,
+    y: 0,
+    z: -(v.halfWidth + RULES.PLAYER.radius + 0.4),
+  });
+  pe.body.setEnabled(true);
+  pe.body.setTranslation(
+    { x: t.x + side.x, y: t.y + 0.3, z: t.z + side.z },
+    true,
+  );
+  pe.body.setLinvel(ve.body.linvel(), true); // keep the car's momentum, like real life
+  pe.input = { x: 0, z: 0, jump: false };
+  pe.inVehicle = undefined;
+  sim.fallState.set(playerId, { vy: 0, grounded: true });
+  v.driver = null;
+  return true;
+}
+
+/** Call from removeEntity: frees the controller and releases any driver / seated player. */
+export function detachVehicle(sim: Sim, id: string): void {
+  const e = sim.bodies.get(id);
+  if (!e) return;
+  if (e.vehicle) {
+    if (e.vehicle.driver) exitVehicle(sim, e.vehicle.driver);
+    sim.world.removeVehicleController(e.vehicle.controller);
+  }
+  if (e.inVehicle) {
+    const ve = sim.bodies.get(e.inVehicle);
+    if (ve?.vehicle) ve.vehicle.driver = null;
+  }
+}
+
+// ------------------------------------------------------------------ HELPERS
+export const speedKmh = (sim: Sim, vehicleId: string): number =>
+  (sim.bodies.get(vehicleId)?.vehicle?.speed ?? 0) * 3.6;
+
+export const driverOf = (sim: Sim, vehicleId: string): string | null =>
+  sim.bodies.get(vehicleId)?.vehicle?.driver ?? null;
