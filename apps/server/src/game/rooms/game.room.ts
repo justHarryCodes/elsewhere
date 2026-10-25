@@ -1,19 +1,17 @@
 import { Client, Room } from 'colyseus';
 import {
   ActionMessage,
-  CITY_CELL,
   CITY_SEED,
   GRAVITY,
   HUMAN_BODIES,
   HumanBody,
   InputMessage,
   JoinOptions,
-  KERB_HEIGHT,
   Messages,
   PLAYER_SPEED,
   TeleportMessage,
   generateCity,
-  nearestSpot,
+  arrivalAt,
   sidewalkAt,
   isHumanAnimation,
   isHumanBody,
@@ -25,7 +23,6 @@ import { GameState, Player } from '../schema/game.state';
 const COLORS = ['#ef4444', '#f59e0b', '#22c55e', '#3b82f6', '#a855f7', '#ec4899', '#14b8a6', '#eab308'];
 const BODIES = Object.keys(HUMAN_BODIES) as HumanBody[];
 const MAX_STEPS_PER_TICK = 5; // after a stall, drop time rather than run a burst of steps
-const SIDEWALK_OFFSET = CITY_CELL / 2 - 0.4; // a road tile's centre to the middle of its sidewalk
 const FALL_RESET_Y = -50; // anyone who somehow falls out of the world is put back on a street
 
 export class GameRoom extends Room<GameState> {
@@ -54,8 +51,8 @@ export class GameRoom extends Room<GameState> {
       const entry = this.walkers.get(client.sessionId);
       const player = this.state.players.get(client.sessionId);
       if (!entry || !player || !Number.isFinite(message?.x) || !Number.isFinite(message?.z)) return;
-      // Always onto a sidewalk, never inside a building or out of town.
-      const to = sidewalkAt(nearestSpot(this.city, message.x, message.z));
+      // Right there on open ground; onto the nearest sidewalk if that's inside a building or out of town.
+      const to = arrivalAt(this.city, message.x, message.z, player.heading);
       entry.walker.body.setTranslation(to, true);
       entry.velocityY = 0;
       Object.assign(player, { x: to.x, y: to.y, z: to.z, heading: to.heading });
@@ -111,14 +108,7 @@ export class GameRoom extends Room<GameState> {
       .sort((a, b) => Math.hypot(a.x - cx, a.z - cz) - Math.hypot(b.x - cx, b.z - cz))
       .slice(0, 24);
     const spot = near[Math.floor(Math.random() * near.length)];
-    const side = Math.random() < 0.5 ? 1 : -1;
-    // Sidewalks run either side of the road, square to the direction of travel.
-    return {
-      x: spot.x + Math.cos(spot.heading) * SIDEWALK_OFFSET * side,
-      y: KERB_HEIGHT,
-      z: spot.z - Math.sin(spot.heading) * SIDEWALK_OFFSET * side,
-      heading: spot.heading,
-    };
+    return sidewalkAt(spot, Math.random() < 0.5 ? 1 : -1);
   }
 
   private update(dt: number) {

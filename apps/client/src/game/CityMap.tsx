@@ -1,11 +1,12 @@
 import { useEffect, useMemo, useRef, useState } from 'react';
-import { CITY_CELL, type City, type CityZone, cityObjectRect, cityZoneAt } from '@game/shared';
+import { CITY_ZONE_LABELS, type City, type CityZone, cityZoneAt } from '@game/shared';
 
 const ZONE_STYLE: Record<CityZone, { label: string; lot: string; building: string; edge: string }> = {
-  residential: { label: 'HOMES', lot: '#0c2321', building: 'rgba(31,209,178,0.28)', edge: '#1fd1b2' },
-  commercial: { label: 'DOWNTOWN', lot: '#1a0f2e', building: 'rgba(255,43,214,0.3)', edge: '#ff2bd6' },
-  industrial: { label: 'INDUSTRY', lot: '#1f1a10', building: 'rgba(255,176,46,0.25)', edge: '#ffb02e' },
+  residential: { label: CITY_ZONE_LABELS.residential.toUpperCase(), lot: '#0c2321', building: 'rgba(31,209,178,0.28)', edge: '#1fd1b2' },
+  commercial: { label: CITY_ZONE_LABELS.commercial.toUpperCase(), lot: '#1a0f2e', building: 'rgba(255,43,214,0.3)', edge: '#ff2bd6' },
+  industrial: { label: CITY_ZONE_LABELS.industrial.toUpperCase(), lot: '#1f1a10', building: 'rgba(255,176,46,0.25)', edge: '#ffb02e' },
 };
+const LOT_COLOURS = { parking: '#15121f', yard: '#17150f', plaza: '#241a35', dirt: '#1a140c' } as const;
 const ROAD = '#2c2547';
 
 export interface MapPlayer {
@@ -49,16 +50,19 @@ export function CityMap({
     ctx.fillStyle = '#07040f';
     ctx.fillRect(0, 0, canvas.width, canvas.height);
     ctx.fillStyle = ROAD;
-    for (const r of city.roads) ctx.fillRect(px(r.x - CITY_CELL / 2), pz(r.z + CITY_CELL / 2), CITY_CELL * scale, CITY_CELL * scale);
+    const rect = (r: { x0: number; z0: number; x1: number; z1: number }) => [px(r.x0), pz(r.z1), (r.x1 - r.x0) * scale, (r.z1 - r.z0) * scale] as const;
+    for (const r of city.roads) ctx.fillRect(...rect(r));
     for (const b of city.blocks) {
       ctx.fillStyle = ZONE_STYLE[b.zone].lot;
-      ctx.fillRect(px(b.x0), pz(b.z1), (b.x1 - b.x0) * scale, (b.z1 - b.z0) * scale);
+      ctx.fillRect(...rect(b));
+    }
+    for (const lot of city.lots) {
+      ctx.fillStyle = LOT_COLOURS[lot.kind];
+      ctx.fillRect(...rect(lot));
     }
     ctx.lineWidth = 1.5;
-    for (const o of city.objects) {
-      if (!o.model.includes('/building')) continue;
-      const r = cityObjectRect(o);
-      const style = ZONE_STYLE[cityZoneAt(city, o.x) ?? 'commercial'];
+    for (const r of city.buildings) {
+      const style = ZONE_STYLE[r.zone];
       ctx.fillStyle = style.building;
       ctx.strokeStyle = style.edge;
       ctx.globalAlpha = Math.min(1, 0.45 + r.height / 40); // taller glows brighter

@@ -32,7 +32,7 @@ interface Look {
 // Day: a hazy, slightly cool city sky; the neon is there but the sun wins.
 const DAY: Look = {
   sky: new Color4(0.55, 0.66, 0.82, 1),
-  fogDensity: 0.003,
+  fogDensity: 0.0018,
   hemi: 0.7,
   hemiSky: new Color3(1, 1, 1),
   hemiGround: new Color3(0.35, 0.33, 0.4),

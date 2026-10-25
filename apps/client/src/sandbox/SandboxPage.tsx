@@ -89,7 +89,7 @@ export function SandboxPage() {
         <CityMap
           city={sandboxRef.current.cityPlan}
           player={() => sandbox()?.mapPlayer()}
-          onNavigate={(x, z) => sandbox()?.navigateTo(x, z)}
+          onNavigate={(x, z) => sandbox()?.goTo(x, z)}
           onClose={() => setMapOpen(false)}
         />
       )}

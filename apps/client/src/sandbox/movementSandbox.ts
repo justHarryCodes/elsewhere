@@ -31,14 +31,17 @@ import {
   type HumanBody,
   defaultAppearance,
   type SizeKey,
-  CITY_CELL,
   KERB_HEIGHT,
   type VehicleModelKey,
   CITY_SEED,
   type City,
   type CityZone,
   generateCity,
+  isOpenGround,
   laneAt,
+  LANE_WIDTH,
+  SIDEWALK_WIDTH,
+  STREET_WIDTH,
   nearestSpot,
 } from '@game/shared';
 import { Atmosphere } from '../game/babylon/atmosphere';
@@ -92,7 +95,6 @@ const KEYS = {
 const GROUND_SIZE = 200;
 // The city starts just north of the test yard's ground and is centred on it east-west.
 const CITY_ORIGIN = { x: -500, z: GROUND_SIZE / 2 + 4 };
-const LANE_OFFSET = 1.6; // metres from a road's centre line to the middle of the right-hand lane
 // Camera distance and angle from straight up for each view.
 const SANDBOX_VIEWS: Record<CameraView, { radius: number; beta: number }> = {
   street: { radius: 3.5, beta: 1.42 },
@@ -220,6 +222,8 @@ export class MovementSandbox {
     this.cityRenderer = CityRenderer.create(this.scene, this.city, {
       outsideGround: true,
       onMesh: (mesh, kind) => {
+        // Buildings cast shadows (only round the camera: see SHADOW_RANGE).
+        if (kind === 'building') this.shadows.addShadowCaster(mesh, false);
         if (kind === 'neon' || kind === 'lamp') return;
         this.glow.addExcludedMesh(mesh);
         mesh.onDisposeObservable.addOnce(() => this.glow.removeExcludedMesh(mesh));
@@ -350,7 +354,25 @@ export class MovementSandbox {
   /** Goes to the street nearest a point (e.g. one clicked on the map). */
   navigateTo(x: number, z: number, zone?: CityZone) {
     const spot = nearestSpot(this.city, x, z, zone);
-    this.travel(laneAt(spot), CITY_CELL / 2 - LANE_OFFSET - 0.5, KERB_HEIGHT);
+    // From the kerbside lane to the middle of the sidewalk.
+    this.travel(laneAt(spot), STREET_WIDTH / 2 - SIDEWALK_WIDTH / 2 - LANE_WIDTH * 1.5, KERB_HEIGHT);
+  }
+
+  /**
+   * A click on the map: on foot, right there if it's open ground (with the car parked in the nearest
+   * street); driving, or inside a building, the nearest street.
+   */
+  goTo(x: number, z: number) {
+    if (this.driving || this.boarding || !this.character || !isOpenGround(this.city, x, z)) {
+      this.navigateTo(x, z);
+      return;
+    }
+    const root = this.character.root;
+    root.position.set(x, KERB_HEIGHT + 0.05, z);
+    this.vehicle?.placeWalker(root.position);
+    this.velocityY = 0;
+    this.camera.target.copyFrom(root.position.add(new Vector3(0, CAMERA_TARGET_HEIGHT, 0)));
+    if (this.vehicle) void this.vehicle.respawn(laneAt(nearestSpot(this.city, x, z)));
   }
 
   /** The car to `car` (driver and all, if driving); on foot, the character beside it to its right. */
