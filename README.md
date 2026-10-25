@@ -52,15 +52,24 @@ The header toggle switches between the Babylon.js and Three.js renderers.
 
 ## Vehicles
 
-- `packages/shared/src/vehicles.ts` defines each drivable car: model file, real-world size, which nodes are
-  wheels, which materials are paint / headlights / tail lights / siren, measured wheel and body bounds, and
-  handling. Six Quaternius cars share one rig (police car, sports car, SUV, taxi, hatchback, sedan).
-- `packages/shared/src/physics-vehicle.ts` drives them on Rapier's raycast vehicle: engine, brakes with front bias,
-  speed-sensitive steering, suspension and tyre grip per surface. Import physics from `@game/shared/physics`.
-- `apps/client/src/game/babylon/vehicles.ts` draws a `VehicleSnapshot`: body pose, steering and spinning wheels,
-  suspension travel, per-car paint, headlights (low/high), brake and reverse lights, and the police siren.
-- Try it in `/sandbox`: walk to the car and press **E**. W/S throttle and brake (hold S to reverse), A/D steer,
-  Space handbrake, **L** headlights, **K** siren, **N** night.
+- **27 drivable models**, every car, truck, bus and bike under `public/assets`. Their per-model data (which way the
+  model faces, body and wheel bounds, which materials are paint / headlights / tail lights / reverse lights / glass /
+  siren) is generated into `packages/shared/src/vehicle-catalog.ts` by `scripts/vehicles/build_catalog.py`. To add a
+  vehicle, put the `.glb` in `public/assets`, add a line to `MODELS` in that script, run
+  `python3 scripts/vehicles/build_catalog.py`, and try it in the sandbox.
+- `packages/shared/src/vehicles.ts` turns that into real-world geometry (scaled to the size catalog) and handling per
+  class (compact, sedan, sports, supercar, SUV, pickup, van, truck, bus, motorcycle, bicycle).
+- `packages/shared/src/physics-vehicle.ts` drives them on Rapier's raycast vehicle: engine, front-biased brakes,
+  speed-sensitive steering, suspension, tyre grip per surface, stability control (off with the handbrake), and
+  two-wheelers kept upright. Import physics from `@game/shared/physics`.
+- `apps/client/src/game/babylon/vehicles.ts` draws a `VehicleSnapshot`: body pose, steering and spinning wheels (or
+  whole axles), suspension travel, per-car paint with gloss / metallic / matte finish, see-through glass, headlights
+  (low/high), brake, reverse and siren lamps. Models whose wheels are part of the body still drive, without spinning.
+- The sky (`public/assets/environment/sky.hdr`, from `scripts/environment/make_sky_hdr.py`) lights every PBR material
+  and gives paint its reflections.
+- Try it in `/sandbox`: walk to the car and press **E**: the driver walks to the door, opens it, sits in, and drives.
+  W/S throttle and brake (hold S to reverse), A/D steer, Space handbrake, **L** headlights, **K** siren, **N** night,
+  stop and **E** to get out.
 
 ## Configuration
 

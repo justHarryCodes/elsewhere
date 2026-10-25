@@ -7,7 +7,7 @@ import type RAPIER from "@dimforge/rapier3d-compat";
 import { RULES, step, isGrounded, type Sim, type Vec3 } from "./physics-core";
 import { ALL_LAYERS as ALL, DAMAGE, LAYER, PLAYER, WATER_DENSITY, groups } from "./physics-config";
 import { HUMAN_METRICS } from "./scale";
-import { detachVehicle, stepVehicles } from "./physics-vehicle";
+import { detachVehicle, keepUpright, stepVehicles } from "./physics-vehicle";
 
 // DAMAGE rules live in physics-config.ts (fall height is derived from your GRAVITY).
 // Collision layers live there too, so physics-vehicle.ts can use them without a circular import.
@@ -402,6 +402,7 @@ export function stepAll(
   stepVehicles(sim); // engine, brakes, steering and suspension rays, before the solver
   if (waterY !== undefined) applyBuoyancy(sim, waterY);
   step(sim); // gravity, drag, player input, solver, speed caps
+  keepUpright(sim); // two-wheelers don't roll over
   processEvents(sim, handlers);
   updateFallDamage(sim, handlers);
   cleanupProjectiles(sim);

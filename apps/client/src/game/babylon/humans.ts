@@ -117,6 +117,12 @@ export class HumanCharacter {
     group.start(loop);
   }
 
+  /** Seconds the animation takes at the current playback speed (0 if the clip is missing). */
+  duration(animation: HumanAnimation): number {
+    const group = this.group(animation);
+    return group ? group.getLength() / this.speedRatio : 0;
+  }
+
   /** Playback speed for every clip on this character (1 = authored speed). */
   setSpeedRatio(ratio: number) {
     this.speedRatio = ratio;

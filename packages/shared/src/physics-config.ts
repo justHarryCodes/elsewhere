@@ -130,18 +130,20 @@ export const VEHICLE = {
   suspensionCompression: 2.4, // damping while the spring compresses
   suspensionRelaxation: 3.2, // damping while it extends
   suspensionTravel: 0.18, // metres of travel either side of rest
-  // Base friction slip (Rapier's max tyre impulse per unit of wheel load), multiplied by model grip
-  // and the ground's friction. Too low and cars slide out of every fast corner.
-  tireFriction: 4,
+  // Base friction slip (Rapier's max tyre impulse per unit of wheel load, roughly the tyre's mu),
+  // multiplied by model grip and the ground's friction. ~1.3 g for an ordinary road car.
+  tireFriction: 1.3,
+  escGain: 6, // stability control: share of excess yaw rate removed per second
+  escMinSpeed: 2, // m/s; below this the car is manoeuvring and ESC stays out of the way
   handbrakeRearGrip: 0.35, // rear grip fraction while the handbrake is on
   brakeFrontBias: 0.65, // share of braking on the front axle; even braking locks the rear and spins the car
   rollingResistance: 0.015, // coasting drag as a fraction of weight
   steerRate: 2.5, // how fast steering input reaches full lock, per second
   steerFadeSpeed: 0.4, // fraction of top speed at which steering has narrowed to minSteerDeg
   enterDistance: 2.5, // metres from the body's edge a player may get in
-  // Centre of mass below the body's middle, as a fraction of body height. Raycast cars need it low
-  // (near the axles) or weight transfer under braking lifts the rear and spins them.
-  centreOfMassDrop: 0.6,
+  // Centre of mass height as a fraction of roof height: ~0.36 puts a 1.4 m car's at 0.5 m and a
+  // bus's at 1.3 m, close to the real figures.
+  centreOfMassHeight: 0.36,
 } as const;
 
 // ---------------------------------------------------------------- damage (new, tune freely)

@@ -19,9 +19,12 @@ import { RULES, type Sim, type Vec3 } from "./physics-core";
 import * as C from "./physics-config";
 import {
   VEHICLE_MODELS,
+  vehicleFeatures,
+  vehicleHandling,
   VehicleLights,
   vehicleGeometry,
   type HeadlightMode,
+  type PaintFinish,
   type VehicleGeometry,
   type VehicleHandling,
   type VehicleModelKey,
@@ -41,7 +44,9 @@ export interface VehicleState {
   handling: VehicleHandling;
   geometry: VehicleGeometry;
   mass: number;
+  /** #rrggbb, or "" for the model's own colour. */
   paint: string;
+  finish: PaintFinish;
   headlights: HeadlightMode;
   siren: boolean;
   /** Smoothed steering input, -1..1 (+ right). */
@@ -89,6 +94,7 @@ function rotate(q: { x: number; y: number; z: number; w: number }, v: Vec3): Vec
 export interface VehicleOptions {
   yaw?: number; // radians, heading like players (0 faces +Z)
   paint?: string;
+  finish?: PaintFinish;
 }
 
 /** Spawn a drivable vehicle. `pos` is the point on the ground under it. */
@@ -97,10 +103,11 @@ export function addVehicle(
   id: string,
   model: VehicleModelKey,
   pos: Vec3,
-  { yaw = 0, paint }: VehicleOptions = {},
+  { yaw = 0, paint = "", finish = "gloss" }: VehicleOptions = {},
 ): RAPIER.RigidBody {
   const { RAPIER, world } = sim;
   const def = VEHICLE_MODELS[model];
+  const handling = vehicleHandling(model);
   const geo = vehicleGeometry(model);
   const mass = C.massFor(def.size, "metal");
   const g = Math.abs(RULES.GRAVITY);
@@ -129,7 +136,8 @@ export function addVehicle(
       .setRestitution(0.05)
       .setMassProperties(
         mass,
-        { x: 0, y: bodyCentreY - H * C.VEHICLE.centreOfMassDrop, z: 0 },
+        // relative to the collider, which sits at bodyCentreY
+        { x: 0, y: geo.bodyTop * C.VEHICLE.centreOfMassHeight - bodyCentreY, z: 0 },
         {
           x: (mass / 12) * (H * H + L * L),
           y: (mass / 12) * (W * W + L * L),
@@ -161,17 +169,18 @@ export function addVehicle(
     cc.setWheelSuspensionRelaxation(i, C.VEHICLE.suspensionRelaxation);
     cc.setWheelMaxSuspensionForce(i, mass * g * 2);
     cc.setWheelSideFrictionStiffness(i, 1.0);
-    cc.setWheelFrictionSlip(i, def.handling.grip * C.VEHICLE.tireFriction);
+    cc.setWheelFrictionSlip(i, handling.grip * C.VEHICLE.tireFriction);
   });
 
-  const drive = def.handling.drive;
+  const drive = handling.drive;
   const state: VehicleState = {
     controller: cc,
     model,
-    handling: def.handling,
+    handling,
     geometry: geo,
     mass,
-    paint: paint ?? def.paint,
+    paint,
+    finish,
     headlights: "off",
     siren: false,
     steer: 0,
@@ -271,6 +280,24 @@ export function stepVehicles(sim: Sim): void {
 
     cc.updateVehicle(dt, RAPIER.QueryFilterFlags.EXCLUDE_SENSORS, rayGroups);
 
+    // ---- stability control (ESC, as in modern cars): don't let the car yaw faster than its steering
+    // and tyres allow, so braking or lifting mid-corner doesn't spin it. Off with the handbrake.
+    if (!inp.handbrake && Math.abs(speed) > C.VEHICLE.escMinSpeed) {
+      const up = rotate(e.body.rotation(), { x: 0, y: 1, z: 0 });
+      const w = e.body.angvel();
+      const yawRate = w.x * up.x + w.y * up.y + w.z * up.z;
+      const geo = v.geometry;
+      const wheelbase = geo.wheels[0].z - geo.wheels[2].z;
+      const kinematic = (speed * Math.tan(wheelYaw)) / wheelbase; // + = turning left
+      const limit = (h.grip * C.VEHICLE.tireFriction * g) / Math.abs(speed); // yaw rate the tyres can hold
+      const error = yawRate - clamp(kinematic, -limit, limit);
+      const L = geo.halfLength * 2;
+      const W = geo.halfWidth * 2;
+      const inertia = (v.mass / 12) * (L * L + W * W);
+      const k = -error * inertia * Math.min(1, C.VEHICLE.escGain * dt);
+      e.body.applyTorqueImpulse({ x: up.x * k, y: up.y * k, z: up.z * k }, true);
+    }
+
     // ---- data for rendering the wheels on the client
     for (let i = 0; i < 4; i++) {
       const w = v.wheels[i];
@@ -288,6 +315,31 @@ export function stepVehicles(sim: Sim): void {
   }
 }
 
+/**
+ * Two-wheelers ride on four raycast wheels with a narrow track and would tip over in turns. After
+ * the solver runs (call AFTER world.step), strip any roll so they stay upright; heading and pitch
+ * (ramps, hills) are kept. Leaning into corners can be layered on visually later.
+ */
+export function keepUpright(sim: Sim): void {
+  for (const e of sim.bodies.values()) {
+    const v = e.vehicle;
+    if (e.kind !== "vehicle" || !v?.handling.upright) continue;
+    const q = e.body.rotation();
+    const f = rotate(q, { x: 0, y: 0, z: 1 });
+    const heading = Math.atan2(f.x, f.z);
+    const pitch = -Math.asin(clamp(f.y, -1, 1));
+    // yaw about +Y, then pitch about the vehicle's own X axis
+    const sy = Math.sin(heading / 2);
+    const cy = Math.cos(heading / 2);
+    const sp = Math.sin(pitch / 2);
+    const cp = Math.cos(pitch / 2);
+    e.body.setRotation({ x: cy * sp, y: sy * cp, z: -sy * sp, w: cy * cp }, false);
+    const w = e.body.angvel();
+    const along = w.x * f.x + w.y * f.y + w.z * f.z; // roll rate about the forward axis
+    e.body.setAngvel({ x: w.x - along * f.x, y: w.y - along * f.y, z: w.z - along * f.z }, false);
+  }
+}
+
 // ------------------------------------------------------------------ LIGHTS & SNAPSHOT
 export function setHeadlights(sim: Sim, vehicleId: string, mode: HeadlightMode): void {
   const v = sim.bodies.get(vehicleId)?.vehicle;
@@ -296,7 +348,7 @@ export function setHeadlights(sim: Sim, vehicleId: string, mode: HeadlightMode):
 
 export function setSiren(sim: Sim, vehicleId: string, on: boolean): void {
   const v = sim.bodies.get(vehicleId)?.vehicle;
-  if (v) v.siren = on && !!VEHICLE_MODELS[v.model].rig.materials.sirenA;
+  if (v) v.siren = on && vehicleFeatures(v.model).siren;
 }
 
 export function vehicleLights(v: VehicleState): number {
@@ -320,6 +372,7 @@ export function vehicleSnapshot(sim: Sim, vehicleId: string): VehicleSnapshot | 
   return {
     model: v.model,
     paint: v.paint,
+    finish: v.finish,
     x: p.x,
     y: p.y,
     z: p.z,

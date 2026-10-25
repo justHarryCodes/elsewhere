@@ -5,7 +5,8 @@ import {
   LoadAssetContainerAsync,
   type Material,
   MultiMaterial,
-  type PBRMaterial,
+  type Node,
+  PBRMaterial,
   Quaternion,
   type Scene,
   TransformNode,
@@ -15,7 +16,9 @@ import {
   VEHICLE_MODELS,
   VehicleLights,
   vehicleGeometry,
-  type ModelBounds,
+  type MaterialRole,
+  type PaintFinish,
+  type VehicleCatalogEntry,
   type VehicleGeometry,
   type VehicleModelKey,
   type VehicleSnapshot,
@@ -34,6 +37,17 @@ const SIREN_A = new Color3(0.02, 0.1, 1);
 const SIREN_B = new Color3(1, 1, 1);
 const SIREN_STRENGTH = 1.8;
 const SIREN_PERIOD = 0.6; // seconds for one blue-white cycle
+const GLASS_ALPHA = 0.55; // shows the driver; more see-through exposes models with no interior
+
+/**
+ * Car paint is a base coat under a clear coat. Metallic flake makes the base reflect like metal;
+ * matte (a satin wrap) has no clear coat at all.
+ */
+const FINISHES: Record<PaintFinish, { metallic: number; roughness: number; clearCoat: number }> = {
+  gloss: { metallic: 0.05, roughness: 0.45, clearCoat: 1 },
+  metallic: { metallic: 0.85, roughness: 0.3, clearCoat: 1 },
+  matte: { metallic: 0.1, roughness: 0.8, clearCoat: 0 },
+};
 
 /** Loads each vehicle model once and creates any number of independently painted instances. */
 export class VehicleLibrary {
@@ -44,7 +58,13 @@ export class VehicleLibrary {
   load(model: VehicleModelKey): Promise<AssetContainer> {
     let container = this.containers.get(model);
     if (!container) {
-      container = LoadAssetContainerAsync(VEHICLE_MODELS[model].url, this.scene);
+      container = LoadAssetContainerAsync(VEHICLE_MODELS[model].url, this.scene).then((loaded) => {
+        // Some models are exported with the artist's camera and lights; the scene has its own.
+        for (const item of [...loaded.cameras, ...loaded.lights]) item.dispose();
+        loaded.cameras.length = 0;
+        loaded.lights.length = 0;
+        return loaded;
+      });
       this.containers.set(model, container);
     }
     return container;
@@ -56,6 +76,7 @@ export class VehicleLibrary {
     const entries = container.instantiateModelsToScene((source) => `${name}-${source}`, true, {
       doNotInstantiate: true,
     });
+    entries.animationGroups.forEach((group) => group.dispose());
     return new VehicleVisual(this.scene, model, name, entries.rootNodes as TransformNode[]);
   }
 
@@ -68,27 +89,28 @@ export class VehicleLibrary {
 interface WheelRig {
   steer: TransformNode; // yaw around the wheel centre
   spin: TransformNode; // roll around the axle
-  rest: { x: number; y: number; z: number }; // pivot position, model units
-  wheels: number[]; // physics wheel indices this mesh follows (the rear axle is one mesh)
+  restY: number; // pivot height, metres
+  physics: number[]; // physics wheel indices this part follows (an axle mesh follows two)
   front: boolean;
 }
 
 /**
- * One drawn vehicle. Call apply() with a VehicleSnapshot every frame; it places the body,
- * turns and spins the wheels, moves them on their suspension, and drives paint and lamps.
+ * One drawn vehicle. Call apply() with a VehicleSnapshot every frame; it places the body, turns and
+ * spins the wheels, moves them on their suspension, and drives paint, finish and lamps.
+ *
+ *   root (physics pose: origin on the ground under the body centre, facing +Z)
+ *   ├── frame (turns, scales and centres the model as exported)
+ *   │   └── model nodes
+ *   └── wheel pivots (vehicle space, metres) ── spin ── wheel node
  */
 export class VehicleVisual {
   readonly root: TransformNode;
   readonly geometry: VehicleGeometry;
   private readonly wheels: WheelRig[] = [];
-  private readonly paint: PBRMaterial[] = [];
-  private readonly lamps: Record<'headlight' | 'taillight' | 'sirenA' | 'sirenB', PBRMaterial[]> = {
-    headlight: [],
-    taillight: [],
-    sirenA: [],
-    sirenB: [],
-  };
+  private readonly roles = new Map<MaterialRole, PBRMaterial[]>();
   private paintHex = '';
+  private finish?: PaintFinish;
+  private readonly originalPaint = new Map<PBRMaterial, Color3>();
   private time = 0;
 
   constructor(
@@ -97,40 +119,59 @@ export class VehicleVisual {
     name: string,
     rootNodes: TransformNode[],
   ) {
-    const def = VEHICLE_MODELS[model];
+    const def: VehicleCatalogEntry = VEHICLE_MODELS[model];
     this.geometry = vehicleGeometry(model);
-    const { scale, offset } = this.geometry;
+    const { scale, offset, yaw } = this.geometry;
 
-    // root follows the physics body (origin on the ground under the body centre);
-    // frame scales the model to real size and centres it on that origin.
     this.root = new TransformNode(`vehicle-${name}`, scene);
     this.root.rotationQuaternion = Quaternion.Identity();
     const frame = new TransformNode(`vehicle-${name}-frame`, scene);
     frame.parent = this.root;
+    frame.rotation.y = yaw;
     frame.scaling.setAll(scale);
-    frame.position.set(offset.x * scale, 0, offset.z * scale);
+    frame.position.set(offset.x * scale, offset.y * scale, offset.z * scale);
     for (const node of rootNodes) node.parent = frame;
     // setParent() below keeps world transforms, so they must be current.
-    for (const node of [this.root, frame, ...frame.getDescendants(false)]) (node as TransformNode).computeWorldMatrix(true);
+    for (const node of [this.root, frame, ...frame.getDescendants(false)]) (node as TransformNode).computeWorldMatrix?.(true);
 
-    const meshes = this.root.getChildMeshes(false);
-    const { nodes, materials } = def.rig;
-    this.rigWheel(meshes, nodes.frontLeft, def.bounds.frontLeft, [0], true);
-    this.rigWheel(meshes, nodes.frontRight, def.bounds.frontRight, [1], true);
-    this.rigWheel(meshes, nodes.rear, def.bounds.rear, [2, 3], false);
+    const nodes = new Map<string, Node>();
+    for (const node of frame.getDescendants(false)) nodes.set(node.name.slice(name.length + 1), node);
+    for (const wheel of this.geometry.visualWheels) {
+      const parts = wheel.nodes.map((n) => nodes.get(n)).filter((n): n is TransformNode => n instanceof TransformNode);
+      if (!parts.length) {
+        console.warn(`Vehicle ${model}: wheel node ${wheel.nodes.join(', ')} not found`);
+        continue;
+      }
+      const steer = new TransformNode(`${name}-wheel-steer`, scene);
+      steer.parent = this.root;
+      steer.position.set(wheel.x, wheel.y, wheel.z);
+      const spin = new TransformNode(`${name}-wheel-spin`, scene);
+      spin.parent = steer;
+      steer.computeWorldMatrix(true);
+      spin.computeWorldMatrix(true);
+      for (const part of parts) part.setParent(spin);
+      this.wheels.push({ steer, spin, restY: wheel.y, physics: wheel.physics, front: wheel.front });
+    }
 
     const byName = new Map<string, PBRMaterial[]>();
-    for (const material of uniqueMaterials(meshes)) {
+    for (const material of uniqueMaterials(this.root.getChildMeshes(false))) {
+      if (!(material instanceof PBRMaterial)) continue;
       const source = material.name.slice(name.length + 1); // undo the `${name}-` prefix
-      byName.set(source, [...(byName.get(source) ?? []), material as PBRMaterial]);
+      byName.set(source, [...(byName.get(source) ?? []), material]);
     }
-    this.paint.push(...(byName.get(materials.paint) ?? []));
-    this.lamps.headlight.push(...(byName.get(materials.headlight) ?? []));
-    this.lamps.taillight.push(...(byName.get(materials.taillight) ?? []));
-    if (materials.sirenA) this.lamps.sirenA.push(...(byName.get(materials.sirenA) ?? []));
-    if (materials.sirenB) this.lamps.sirenB.push(...(byName.get(materials.sirenB) ?? []));
+    for (const [role, names] of Object.entries(def.materials) as [MaterialRole, readonly string[]][]) {
+      this.roles.set(role, names.flatMap((n) => byName.get(n) ?? []));
+    }
+    for (const material of this.materials('paint')) this.originalPaint.set(material, material.albedoColor.clone());
     // Unlit lamps keep their authored colour; lit ones add emissive on top.
-    for (const material of Object.values(this.lamps).flat()) material.emissiveColor = Color3.Black();
+    for (const role of ['headlight', 'taillight', 'reverse', 'sirenA', 'sirenB'] as const) {
+      for (const material of this.materials(role)) material.emissiveColor = Color3.Black();
+    }
+    for (const material of this.materials('glass')) {
+      material.alpha = GLASS_ALPHA;
+      material.transparencyMode = PBRMaterial.MATERIAL_ALPHABLEND;
+      material.backFaceCulling = false;
+    }
   }
 
   /** Meshes to give shadows or bounding boxes to. */
@@ -143,70 +184,72 @@ export class VehicleVisual {
     this.root.position.set(state.x, state.y, state.z);
     this.root.rotationQuaternion!.set(state.qx, state.qy, state.qz, state.qw);
 
-    const { scale } = this.geometry;
     for (const wheel of this.wheels) {
-      const avg = (values: readonly number[]) => wheel.wheels.reduce((sum, i) => sum + values[i], 0) / wheel.wheels.length;
+      const avg = (values: readonly number[]) => wheel.physics.reduce((sum, i) => sum + values[i], 0) / wheel.physics.length;
       wheel.steer.rotation.y = wheel.front ? state.steer : 0;
       wheel.spin.rotation.x = avg(state.wheelSpin);
-      // drop is in metres (positive = wheel hangs lower); the rig lives in model units.
-      wheel.steer.position.y = wheel.rest.y - avg(state.wheelDrop) / scale;
+      wheel.steer.position.y = wheel.restY - avg(state.wheelDrop); // drop: + = wheel hangs lower
     }
 
     this.setPaint(state.paint);
+    this.setFinish(state.finish);
     this.applyLights(state.lights);
   }
 
   setPaint(hex: string) {
     if (hex === this.paintHex) return;
     this.paintHex = hex;
-    const colour = Color3.FromHexString(hex).toLinearSpace();
-    for (const material of this.paint) material.albedoColor = colour;
+    const colour = hex ? Color3.FromHexString(hex).toLinearSpace() : undefined;
+    for (const material of this.materials('paint')) {
+      material.albedoColor = colour ?? this.originalPaint.get(material) ?? material.albedoColor;
+    }
+  }
+
+  setFinish(finish: PaintFinish) {
+    if (finish === this.finish) return;
+    this.finish = finish;
+    const f = FINISHES[finish];
+    for (const material of this.materials('paint')) {
+      material.metallic = f.metallic;
+      material.roughness = f.roughness;
+      material.clearCoat.isEnabled = f.clearCoat > 0;
+      material.clearCoat.intensity = f.clearCoat;
+      material.clearCoat.roughness = 0.03;
+    }
   }
 
   dispose() {
-    for (const material of [...this.paint, ...Object.values(this.lamps).flat()]) material.dispose();
+    for (const material of uniqueMaterials(this.meshes)) material.dispose();
     this.root.dispose(false, true);
+  }
+
+  private materials(role: MaterialRole): PBRMaterial[] {
+    return this.roles.get(role) ?? [];
   }
 
   private applyLights(lights: number) {
     const has = (flag: number) => (lights & flag) !== 0;
     const head = has(VehicleLights.High) ? HEADLIGHT_HIGH : has(VehicleLights.Low) ? HEADLIGHT_LOW : 0;
-    glow(this.lamps.headlight, HEADLIGHT, head);
+    glow(this.materials('headlight'), HEADLIGHT, head);
 
-    if (has(VehicleLights.Reverse)) glow(this.lamps.taillight, REVERSE, REVERSE_STRENGTH);
-    else glow(this.lamps.taillight, TAIL, has(VehicleLights.Brake) ? TAIL_BRAKE : head ? TAIL_RUNNING : 0);
+    const reversing = has(VehicleLights.Reverse);
+    const reverseLamps = this.materials('reverse');
+    const tailStrength = has(VehicleLights.Brake) ? TAIL_BRAKE : head ? TAIL_RUNNING : 0;
+    if (reverseLamps.length) {
+      glow(reverseLamps, REVERSE, reversing ? REVERSE_STRENGTH : 0);
+      glow(this.materials('taillight'), TAIL, tailStrength);
+    } else if (reversing) {
+      glow(this.materials('taillight'), REVERSE, REVERSE_STRENGTH); // no separate reverse lamps
+    } else {
+      glow(this.materials('taillight'), TAIL, tailStrength);
+    }
 
-    // Siren: blue and white alternate, each with a quick double flash.
+    // Siren: the two colours alternate, each with a quick double flash.
     const siren = has(VehicleLights.Siren);
     const phase = (this.time % SIREN_PERIOD) / SIREN_PERIOD;
     const flash = (from: number) => phase >= from && phase < from + 0.5 && (phase - from) % 0.25 < 0.17;
-    glow(this.lamps.sirenA, SIREN_A, siren && flash(0) ? SIREN_STRENGTH : 0);
-    glow(this.lamps.sirenB, SIREN_B, siren && flash(0.5) ? SIREN_STRENGTH : 0);
-  }
-
-  // Wheels are exported with their origin at the car's origin. Give each one a steer + spin pivot at
-  // its own centre, then hang the mesh back under it where it was.
-  private rigWheel(meshes: AbstractMesh[], match: string, bounds: ModelBounds, wheels: number[], front: boolean) {
-    const mesh = meshes.find((m) => m.name.includes(match));
-    if (!mesh) {
-      console.warn(`Vehicle ${this.model}: no wheel mesh matching "${match}"`);
-      return;
-    }
-    const rest = {
-      x: (bounds.min[0] + bounds.max[0]) / 2,
-      y: (bounds.min[1] + bounds.max[1]) / 2,
-      z: (bounds.min[2] + bounds.max[2]) / 2,
-    };
-    const scene = mesh.getScene();
-    const steer = new TransformNode(`${mesh.name}-steer`, scene);
-    steer.parent = mesh.parent;
-    steer.position.set(rest.x, rest.y, rest.z);
-    const spin = new TransformNode(`${mesh.name}-spin`, scene);
-    spin.parent = steer;
-    steer.computeWorldMatrix(true);
-    spin.computeWorldMatrix(true);
-    mesh.setParent(spin);
-    this.wheels.push({ steer, spin, rest, wheels, front });
+    glow(this.materials('sirenA'), SIREN_A, siren && flash(0) ? SIREN_STRENGTH : 0);
+    glow(this.materials('sirenB'), SIREN_B, siren && flash(0.5) ? SIREN_STRENGTH : 0);
   }
 }
 

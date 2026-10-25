@@ -1,33 +1,52 @@
 // Drivable vehicle definitions shared by the physics (server + client prediction) and the renderers.
 //
-// A definition says which model to load, how big it is in the real world, which parts are wheels,
-// which materials are paint and lamps, and how it handles. Physics and rendering both derive their
+// The per-model data (which way it faces, body and wheel bounds, which materials are paint and
+// lamps) is generated from the .glb files into vehicle-catalog.ts by scripts/vehicles/build_catalog.py.
+// This file turns it into real-world geometry and handling. Physics and rendering both derive their
 // geometry from the same numbers, so the wheels you see sit exactly where the physics wheels are.
 //
 // Conventions (same as players): metres, +Y up, a vehicle with heading 0 faces +Z, its left is +X.
 
 import { getRealSize, type SizeKey } from "./scale";
+import { VEHICLE_CATALOG } from "./vehicle-catalog";
 
 type Vec3Tuple = readonly [number, number, number];
 
-/** Axis-aligned bounds of one mesh, in the model's own units, as exported. */
+/** Axis-aligned bounds in model units, after the model has been turned to face +Z. */
 export interface ModelBounds {
   min: Vec3Tuple;
   max: Vec3Tuple;
 }
 
-/** How a model is put together: node names to look for and which material plays which role. */
-export interface VehicleRig {
-  /** Substrings of node names. The rear axle may be one mesh holding both rear wheels. */
-  nodes: { frontLeft: string; frontRight: string; rear: string };
-  /** Material names in the model. Anything not listed keeps its look. */
-  materials: {
-    paint: string;
-    headlight: string;
-    taillight: string;
-    sirenA?: string;
-    sirenB?: string;
-  };
+export type MaterialRole = "paint" | "headlight" | "taillight" | "reverse" | "glass" | "sirenA" | "sirenB";
+
+export interface CatalogWheel {
+  /** glTF node names that make up this wheel (or whole axle). */
+  nodes: readonly string[];
+  min: Vec3Tuple;
+  max: Vec3Tuple;
+  axle: "front" | "rear";
+  /** "both" = one mesh holding the wheels on both sides of an axle. */
+  side: "left" | "right" | "both";
+}
+
+/** One entry of the generated catalog. */
+export interface VehicleCatalogEntry {
+  label: string;
+  url: string;
+  size: SizeKey;
+  /**
+   * Which measured dimension is matched to the catalog size. Stylised models are short and wide:
+   * "width" keeps them in their lane, "average" (geometric mean of both) suits stylised big vehicles.
+   */
+  fit: "width" | "length" | "average";
+  handling: HandlingClass;
+  /** Degrees the model is turned about +Y so it faces +Z. */
+  yaw: number;
+  body: ModelBounds;
+  /** Empty when the model's wheels are not separate parts (they can't spin or steer). */
+  wheels: readonly CatalogWheel[];
+  materials: Partial<Record<MaterialRole, readonly string[]>>;
 }
 
 /** Handling, in real units. Mass comes from the size catalog (MASS_KG). */
@@ -39,44 +58,18 @@ export interface VehicleHandling {
   brakeDecel: number;
   topSpeed: number; // m/s
   reverseTopSpeed: number; // m/s
-  /** Front wheel angle at standstill and at top speed, degrees. */
+  /** Front wheel angle at standstill and at speed, degrees. */
   maxSteerDeg: number;
   minSteerDeg: number;
   /** Tyre grip multiplier: 1 = ordinary road tyre. */
   grip: number;
+  /** Two-wheelers: physics keeps them upright (they don't lean yet). */
+  upright?: boolean;
+  /** Driver sits behind the front axle like a car, at the front like a bus, or astride. */
+  seat: "car" | "cab" | "saddle";
 }
 
-export interface VehicleModel {
-  label: string;
-  url: string;
-  /** Real-world size the model is scaled to. */
-  size: SizeKey;
-  /**
-   * Which measured dimension matches the catalog. These models are stylised (short and wide), so
-   * matching width keeps them fitting real lanes and parking bays.
-   */
-  fit: "width" | "length";
-  rig: VehicleRig;
-  /** Mesh bounds read from the .glb (accessor min/max); the models have no node transforms. */
-  bounds: { body: ModelBounds; frontLeft: ModelBounds; frontRight: ModelBounds; rear: ModelBounds };
-  handling: VehicleHandling;
-  /** Starting paint colour, #rrggbb. */
-  paint: string;
-}
-
-const QUATERNIUS_RIG = (paint: string, siren = false): VehicleRig => ({
-  nodes: { frontLeft: "FrontLeftWheel", frontRight: "FrontRightWheel", rear: "BackWheels" },
-  materials: {
-    paint,
-    headlight: "Headlights",
-    taillight: "TailLights",
-    ...(siren ? { sirenA: "BlueLights", sirenB: "WhiteLights" } : {}),
-  },
-});
-
-const b = (min: Vec3Tuple, max: Vec3Tuple): ModelBounds => ({ min, max });
-
-const ROAD_CAR: VehicleHandling = {
+const ROAD: VehicleHandling = {
   drive: "fwd",
   accel: 3.5,
   brakeDecel: 8.5,
@@ -85,106 +78,47 @@ const ROAD_CAR: VehicleHandling = {
   maxSteerDeg: 35,
   minSteerDeg: 8,
   grip: 1,
+  seat: "car",
 };
 
-export const VEHICLE_MODELS = {
-  policeCar: {
-    label: "Police car",
-    url: "/assets/vehicles/singles/police-car.glb",
-    size: "vehicle.policeCar",
-    fit: "width",
-    rig: QUATERNIUS_RIG("White", true),
-    bounds: {
-      body: b([-0.889, 0.09, -1.867], [0.889, 1.222, 1.863]),
-      frontLeft: b([0.624, -0.016, 0.866], [0.8, 0.534, 1.416]),
-      frontRight: b([-0.799, -0.016, 0.866], [-0.624, 0.534, 1.416]),
-      rear: b([-0.776, -0.016, -1.43], [0.777, 0.534, -0.879]),
-    },
-    handling: { ...ROAD_CAR, drive: "rwd", accel: 4.5, topSpeed: 58, grip: 1.1 },
-    paint: "#f1f5f9",
-  },
-  sportsCar: {
-    label: "Sports car",
-    url: "/assets/vehicles/singles/sports-car.glb",
-    size: "vehicle.sportsCar",
-    fit: "width",
-    rig: QUATERNIUS_RIG("White"),
-    bounds: {
-      body: b([-0.936, 0.152, -2.029], [0.936, 1.187, 1.898]),
-      frontLeft: b([0.637, -0.016, 0.906], [0.815, 0.545, 1.466]),
-      frontRight: b([-0.813, -0.016, 0.906], [-0.635, 0.545, 1.466]),
-      rear: b([-0.79, -0.016, -1.601], [0.792, 0.545, -1.04]),
-    },
-    handling: { ...ROAD_CAR, drive: "rwd", accel: 7, brakeDecel: 10, topSpeed: 75, minSteerDeg: 6, grip: 1.3 },
-    paint: "#dc2626",
-  },
-  suv: {
-    label: "SUV",
-    url: "/assets/vehicles/singles/suv.glb",
-    size: "vehicle.suv",
-    fit: "width",
-    rig: QUATERNIUS_RIG("White"),
-    bounds: {
-      body: b([-1.056, 0.236, -2.105], [1.056, 1.51, 2.104]),
-      frontLeft: b([0.653, -0.018, 0.99], [0.892, 0.636, 1.644]),
-      frontRight: b([-0.882, -0.018, 0.99], [-0.643, 0.636, 1.644]),
-      rear: b([-0.909, -0.018, -1.578], [0.919, 0.636, -0.924]),
-    },
-    handling: { ...ROAD_CAR, drive: "awd", accel: 3.2, brakeDecel: 8, topSpeed: 50, maxSteerDeg: 32, grip: 1 },
-    paint: "#334155",
-  },
-  taxi: {
-    label: "Taxi",
-    url: "/assets/vehicles/singles/taxi.glb",
-    size: "vehicle.taxi",
-    fit: "width",
-    rig: QUATERNIUS_RIG("Yellow"),
-    bounds: {
-      body: b([-0.904, 0.154, -2.007], [0.903, 1.3, 2.214]),
-      frontLeft: b([0.594, -0.011, 1.034], [0.785, 0.513, 1.558]),
-      frontRight: b([-0.786, -0.011, 1.034], [-0.595, 0.513, 1.558]),
-      rear: b([-0.784, -0.011, -1.405], [0.783, 0.513, -0.881]),
-    },
-    handling: ROAD_CAR,
-    paint: "#facc15",
-  },
-  hatchback: {
-    label: "Hatchback",
-    url: "/assets/buildings/city-pack/car.glb",
-    size: "vehicle.compactCar",
-    fit: "width",
-    rig: QUATERNIUS_RIG("LightBlue"),
-    bounds: {
-      body: b([-0.819, 0.143, -1.649], [0.819, 1.117, 1.66]),
-      frontLeft: b([0.569, -0.028, 0.793], [0.749, 0.467, 1.288]),
-      frontRight: b([-0.748, -0.028, 0.793], [-0.567, 0.467, 1.288]),
-      rear: b([-0.748, -0.028, -1.203], [0.749, 0.467, -0.708]),
-    },
-    handling: { ...ROAD_CAR, accel: 3, topSpeed: 45, maxSteerDeg: 38 },
-    paint: "#7dd3fc",
-  },
-  sedan: {
-    label: "Sedan",
-    url: "/assets/buildings/city-pack/car-2.glb",
-    size: "vehicle.sedan",
-    fit: "width",
-    rig: QUATERNIUS_RIG("Blue"),
-    bounds: {
-      body: b([-0.904, 0.171, -2.107], [0.904, 1.183, 2.113]),
-      frontLeft: b([0.595, 0.006, 0.934], [0.786, 0.53, 1.458]),
-      frontRight: b([-0.784, 0.006, 0.934], [-0.593, 0.53, 1.458]),
-      rear: b([-0.783, 0.006, -1.505], [0.784, 0.53, -0.981]),
-    },
-    handling: ROAD_CAR,
-    paint: "#2563eb",
-  },
-} as const satisfies Record<string, VehicleModel>;
+/** Typical figures per kind of vehicle; every model picks one. */
+export const HANDLING = {
+  compact: { ...ROAD, accel: 3, topSpeed: 45, maxSteerDeg: 38 },
+  sedan: ROAD,
+  police: { ...ROAD, drive: "rwd", accel: 4.5, topSpeed: 58, grip: 1.1 },
+  sports: { ...ROAD, drive: "rwd", accel: 6, brakeDecel: 9.5, topSpeed: 70, minSteerDeg: 6, grip: 1.2 },
+  supercar: { ...ROAD, drive: "awd", accel: 8, brakeDecel: 10.5, topSpeed: 90, minSteerDeg: 5, grip: 1.35 },
+  suv: { ...ROAD, drive: "awd", accel: 3.2, brakeDecel: 8, maxSteerDeg: 32 },
+  pickup: { ...ROAD, drive: "rwd", accel: 3, brakeDecel: 7.5, topSpeed: 45, maxSteerDeg: 32 },
+  van: { ...ROAD, accel: 2.5, brakeDecel: 7, topSpeed: 40, maxSteerDeg: 34, grip: 0.95, seat: "cab" },
+  truck: { ...ROAD, drive: "rwd", accel: 1.2, brakeDecel: 6, topSpeed: 25, maxSteerDeg: 30, grip: 0.9, seat: "cab" },
+  bus: { ...ROAD, drive: "rwd", accel: 1.3, brakeDecel: 6, topSpeed: 25, maxSteerDeg: 40, grip: 0.9, seat: "cab" },
+  motorcycle: { ...ROAD, drive: "rwd", accel: 7, brakeDecel: 9, topSpeed: 55, maxSteerDeg: 30, minSteerDeg: 4, upright: true, seat: "saddle" },
+  bicycle: { ...ROAD, drive: "rwd", accel: 1.5, brakeDecel: 5, topSpeed: 9, maxSteerDeg: 35, upright: true, seat: "saddle" },
+} as const satisfies Record<string, VehicleHandling>;
+export type HandlingClass = keyof typeof HANDLING;
 
-export type VehicleModelKey = keyof typeof VEHICLE_MODELS;
+export const VEHICLE_MODELS = VEHICLE_CATALOG;
+export type VehicleModelKey = keyof typeof VEHICLE_CATALOG;
 export const DEFAULT_VEHICLE_MODEL: VehicleModelKey = "policeCar";
 
 export const isVehicleModel = (value: unknown): value is VehicleModelKey =>
   typeof value === "string" && Object.prototype.hasOwnProperty.call(VEHICLE_MODELS, value);
+
+export const vehicleHandling = (key: VehicleModelKey): VehicleHandling => HANDLING[VEHICLE_MODELS[key].handling];
+
+/** What a model can show, for UIs: paint needs a plain-coloured body, lamps need lamp materials. */
+export function vehicleFeatures(key: VehicleModelKey) {
+  const m: VehicleCatalogEntry = VEHICLE_MODELS[key];
+  return {
+    paint: !!m.materials.paint?.length,
+    headlights: !!m.materials.headlight?.length,
+    taillights: !!m.materials.taillight?.length,
+    siren: !!m.materials.sirenA?.length,
+    glass: !!m.materials.glass?.length,
+    wheels: m.wheels.length > 0,
+  };
+}
 
 // ------------------------------------------------------------------ geometry (metres)
 
@@ -197,64 +131,139 @@ export interface WheelGeometry {
   left: boolean;
 }
 
+/** A drawn wheel (or whole axle): pivot in vehicle space and the physics wheels it follows. */
+export interface VisualWheel {
+  nodes: readonly string[];
+  x: number;
+  y: number;
+  z: number;
+  front: boolean;
+  physics: number[];
+}
+
 export interface VehicleGeometry {
   /** Uniform scale applied to the model so it matches its catalog size. */
   scale: number;
-  /** Model-space offset that puts the body centre at x = z = 0 (applied before scaling). */
-  offset: { x: number; z: number };
-  /** Body box half extents and its centre height, metres. */
+  /** Turn applied to the model (radians, about +Y) so it faces +Z. */
+  yaw: number;
+  /** Model-unit offset (after turning) that puts the body centre at x = z = 0 and the tyres on y = 0. */
+  offset: { x: number; y: number; z: number };
   halfLength: number;
   halfWidth: number;
+  /** Physics chassis box, vertically. The bottom never dips below the wheel centres. */
   bodyBottom: number;
   bodyTop: number;
   wheelRadius: number;
   wheelWidth: number;
-  /** Order: front-left, front-right, rear-left, rear-right. */
+  /** Physics wheels. Order: front-left, front-right, rear-left, rear-right. */
   wheels: [WheelGeometry, WheelGeometry, WheelGeometry, WheelGeometry];
+  /** Separate wheel parts in the model, empty when the wheels are part of the body. */
+  visualWheels: VisualWheel[];
+  /** Where the driver's hips go, vehicle space. */
+  seat: { x: number; y: number; z: number };
 }
 
-const centre = ({ min, max }: ModelBounds, axis: 0 | 1 | 2) => (min[axis] + max[axis]) / 2;
-const extent = ({ min, max }: ModelBounds, axis: 0 | 1 | 2) => max[axis] - min[axis];
+const centre = ({ min, max }: { min: Vec3Tuple; max: Vec3Tuple }, axis: 0 | 1 | 2) => (min[axis] + max[axis]) / 2;
+const extent = ({ min, max }: { min: Vec3Tuple; max: Vec3Tuple }, axis: 0 | 1 | 2) => max[axis] - min[axis];
+const mean = (values: number[]) => values.reduce((a, b) => a + b, 0) / values.length;
+
+const geometryCache = new Map<VehicleModelKey, VehicleGeometry>();
 
 /** Real-world geometry of a vehicle model, derived from its measured bounds and catalog size. */
 export function vehicleGeometry(key: VehicleModelKey): VehicleGeometry {
-  const model: VehicleModel = VEHICLE_MODELS[key];
-  const { body, frontLeft, frontRight, rear } = model.bounds;
-  const real = getRealSize(model.size);
-  const scale = model.fit === "width" ? real.width / extent(body, 0) : real.length / extent(body, 2);
-  const offset = { x: -centre(body, 0), z: -centre(body, 2) };
+  const cached = geometryCache.get(key);
+  if (cached) return cached;
 
-  const wheelWidth = extent(frontLeft, 0) * scale;
-  const wheelRadius = (extent(frontLeft, 1) / 2) * scale;
-  const wheelY = centre(frontLeft, 1) * scale;
-  const at = (x: number, z: number, front: boolean, left: boolean): WheelGeometry => ({
-    x: (x + offset.x) * scale,
-    y: wheelY,
-    z: (z + offset.z) * scale,
-    front,
-    left,
-  });
-  // The rear axle is one mesh: its wheels sit at its outer edges, one wheel width in.
-  const rearHalfWidth = extent(frontLeft, 0) / 2;
-  return {
+  const model: VehicleCatalogEntry = VEHICLE_MODELS[key];
+  const { body, wheels: parts } = model;
+  const real = getRealSize(model.size);
+  const byWidth = real.width / extent(body, 0);
+  const byLength = real.length / extent(body, 2);
+  const scale = model.fit === "width" ? byWidth : model.fit === "length" ? byLength : Math.sqrt(byWidth * byLength);
+  const ground = parts.length ? Math.min(...parts.map((w) => w.min[1])) : body.min[1];
+  const offset = { x: -centre(body, 0), y: -ground, z: -centre(body, 2) };
+  const toX = (x: number) => (x + offset.x) * scale;
+  const toY = (y: number) => (y + offset.y) * scale;
+  const toZ = (z: number) => (z + offset.z) * scale;
+
+  const halfLength = (extent(body, 2) / 2) * scale;
+  const halfWidth = (extent(body, 0) / 2) * scale;
+  const height = (body.max[1] - ground) * scale;
+
+  let wheelRadius: number;
+  let wheelWidth: number;
+  let physics: VehicleGeometry["wheels"];
+  const visualWheels: VisualWheel[] = [];
+
+  if (parts.length) {
+    wheelRadius = (mean(parts.map((w) => extent(w, 1))) / 2) * scale;
+    const single = parts.find((w) => w.side !== "both");
+    wheelWidth = single ? extent(single, 0) * scale : wheelRadius * 0.7;
+    const wheelY = toY(mean(parts.map((w) => centre(w, 1))));
+    // One physics wheel per corner: left/right parts as they are, axle meshes split at their ends.
+    const corner = (axle: "front" | "rear", left: boolean): WheelGeometry => {
+      const onAxle = parts.filter((w) => w.axle === axle);
+      const z = toZ(mean(onAxle.map((w) => centre(w, 2))));
+      const xs = onAxle.flatMap((w) => {
+        if (w.side === "both") return [left ? toX(w.max[0]) - wheelWidth / 2 : toX(w.min[0]) + wheelWidth / 2];
+        return (w.side === "left") === left ? [toX(centre(w, 0))] : [];
+      });
+      return { x: xs.length ? mean(xs) : (left ? 1 : -1) * (halfWidth - wheelWidth), y: wheelY, z, front: axle === "front", left };
+    };
+    physics = [corner("front", true), corner("front", false), corner("rear", true), corner("rear", false)];
+    for (const w of parts) {
+      const indices = w.axle === "front" ? [0, 1] : [2, 3];
+      visualWheels.push({
+        nodes: w.nodes,
+        x: toX(centre(w, 0)),
+        y: toY(centre(w, 1)),
+        z: toZ(centre(w, 2)),
+        front: w.axle === "front",
+        physics: w.side === "both" ? indices : [indices[w.side === "left" ? 0 : 1]],
+      });
+    }
+  } else {
+    // Wheels are part of the body mesh: put physics wheels where a real vehicle of this size has them.
+    wheelRadius = Math.min(0.5, Math.max(0.3, 0.22 * height));
+    wheelWidth = wheelRadius * 0.7;
+    const axleZ = halfLength - Math.max(wheelRadius * 1.6, halfLength * 0.22);
+    const x = Math.max(0.12, halfWidth - wheelWidth * 0.8);
+    const at = (front: boolean, left: boolean): WheelGeometry => ({
+      x: left ? x : -x, y: wheelRadius, z: front ? axleZ : -axleZ, front, left,
+    });
+    physics = [at(true, true), at(true, false), at(false, true), at(false, false)];
+  }
+
+  const handling = HANDLING[model.handling];
+  const frontZ = physics[0].z;
+  const rearZ = physics[2].z;
+  const floor = Math.max(toY(body.min[1]), 0.15);
+  const seat =
+    handling.seat === "saddle"
+      ? { x: 0, y: Math.max(height * 0.55, 0.6), z: (frontZ + rearZ) / 2 - 0.1 * (frontZ - rearZ) }
+      : handling.seat === "cab"
+        ? { x: halfWidth * 0.5, y: floor + 0.45, z: halfLength - 1.1 }
+        : { x: halfWidth * 0.38, y: floor + 0.4, z: (frontZ + rearZ) / 2 - 0.05 * (frontZ - rearZ) };
+
+  const geometry: VehicleGeometry = {
     scale,
+    yaw: (model.yaw * Math.PI) / 180,
     offset,
-    halfLength: (extent(body, 2) / 2) * scale,
-    halfWidth: (extent(body, 0) / 2) * scale,
-    bodyBottom: body.min[1] * scale,
-    bodyTop: body.max[1] * scale,
+    halfLength,
+    halfWidth,
+    bodyBottom: Math.max(toY(body.min[1]), physics[0].y),
+    bodyTop: toY(body.max[1]),
     wheelRadius,
     wheelWidth,
-    wheels: [
-      at(centre(frontLeft, 0), centre(frontLeft, 2), true, true),
-      at(centre(frontRight, 0), centre(frontRight, 2), true, false),
-      at(rear.max[0] - rearHalfWidth, centre(rear, 2), false, true),
-      at(rear.min[0] + rearHalfWidth, centre(rear, 2), false, false),
-    ],
+    wheels: physics,
+    visualWheels,
+    seat,
   };
+  geometryCache.set(key, geometry);
+  return geometry;
 }
 
-// ------------------------------------------------------------------ lights & state
+// ------------------------------------------------------------------ lights, paint & state
 
 /** Lamp switches, packed into one number for the network. */
 export const VehicleLights = {
@@ -267,10 +276,16 @@ export const VehicleLights = {
 
 export type HeadlightMode = "off" | "low" | "high";
 
+/** Paint finish: gloss = ordinary clear-coated paint, metallic = metal flake under clear coat, matte = satin wrap. */
+export type PaintFinish = "gloss" | "metallic" | "matte";
+export const PAINT_FINISHES: PaintFinish[] = ["gloss", "metallic", "matte"];
+
 /** Everything a renderer needs to draw a vehicle; also the shape it will have in synced state. */
 export interface VehicleSnapshot {
   model: string;
+  /** #rrggbb, or "" to keep the model's own colour. */
   paint: string;
+  finish: PaintFinish;
   x: number;
   y: number;
   z: number;

@@ -2,6 +2,7 @@ import { useEffect, useMemo, useRef, useState } from 'react';
 import {
   HUMAN_ANIMATIONS,
   HUMAN_BODIES,
+  PAINT_FINISHES,
   VEHICLE_MODELS,
   type AnimationLibrary,
   type HeadlightMode,
@@ -19,7 +20,9 @@ const LIBRARY_LABELS: Record<AnimationLibrary, string> = {
 };
 const MOVE_MODES: MoveMode[] = ['walk', 'jog', 'sprint'];
 const SPEED_RATIOS = [0.25, 0.5, 1, 1.5, 2];
-const VEHICLES = Object.entries(VEHICLE_MODELS) as [VehicleModelKey, (typeof VEHICLE_MODELS)[VehicleModelKey]][];
+const VEHICLES = (Object.entries(VEHICLE_MODELS) as [VehicleModelKey, (typeof VEHICLE_MODELS)[VehicleModelKey]][]).sort(
+  (a, b) => a[1].label.localeCompare(b[1].label),
+);
 const HEADLIGHT_MODES: HeadlightMode[] = ['off', 'low', 'high'];
 // Common car paints: white, silver, black, red, blue, yellow, green, orange.
 const PAINTS = ['#f1f5f9', '#94a3b8', '#111827', '#dc2626', '#2563eb', '#facc15', '#15803d', '#ea580c'];
@@ -169,7 +172,13 @@ export function SandboxPage() {
           <header className="flex items-center justify-between">
             <h2 className="text-xs font-semibold tracking-wide text-slate-400 uppercase">Vehicle</h2>
             <span className="text-xs text-slate-400">
-              {!stats?.vehicle ? 'Loading…' : stats.driving ? 'Driving · E to get out' : 'Walk up and press E'}
+              {!stats?.vehicle
+                ? 'Loading…'
+                : stats.boarding
+                  ? 'Getting in or out…'
+                  : stats.driving
+                    ? 'Driving · stop, then E to get out'
+                    : 'Walk up and press E'}
             </span>
           </header>
 
@@ -203,8 +212,23 @@ export function SandboxPage() {
               Respawn
             </button>
           </div>
+          {stats?.vehicle && !stats.vehicle.features.wheels && (
+            <p className="text-xs text-amber-200/80">This model's wheels are part of its body, so they don't spin or steer.</p>
+          )}
 
-          <div className="flex items-center gap-1.5">
+          <div className={`flex items-center gap-1.5 ${stats?.vehicle?.features.paint ? '' : 'pointer-events-none opacity-40'}`}>
+            <button
+              type="button"
+              aria-label="Original colour"
+              title="Original colour"
+              onClick={(event) => {
+                sandbox()?.setVehiclePaint('');
+                event.currentTarget.blur();
+              }}
+              className={`h-6 w-6 rounded-full border-2 bg-[conic-gradient(#ef4444,#f59e0b,#22c55e,#3b82f6,#a855f7,#ef4444)] ${
+                stats?.vehicle?.paint === '' ? 'border-indigo-400' : 'border-slate-700'
+              }`}
+            />
             {PAINTS.map((paint) => (
               <button
                 key={paint}
@@ -223,7 +247,7 @@ export function SandboxPage() {
             <input
               id="vehicle-paint"
               type="color"
-              value={stats?.vehicle?.paint ?? '#ffffff'}
+              value={stats?.vehicle?.paint || '#ffffff'}
               onChange={(event) => sandbox()?.setVehiclePaint(event.target.value)}
               className="h-6 w-8 cursor-pointer rounded bg-transparent"
               title="Any colour"
@@ -231,7 +255,14 @@ export function SandboxPage() {
           </div>
 
           <Segmented
-            label="Headlights (L)"
+            label={stats?.vehicle?.features.paint ? 'Paint finish' : 'Paint finish (this model is texture-painted)'}
+            options={PAINT_FINISHES}
+            value={stats?.vehicle?.finish}
+            onChange={(finish) => sandbox()?.setPaintFinish(finish)}
+          />
+
+          <Segmented
+            label={stats?.vehicle?.features.headlights ? 'Headlights (L)' : 'Headlights (L) · none on this model'}
             options={HEADLIGHT_MODES}
             value={stats?.vehicle?.headlights}
             onChange={(mode) => sandbox()?.setHeadlights(mode)}

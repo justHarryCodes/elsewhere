@@ -6,6 +6,7 @@ import {
   DynamicTexture,
   Engine,
   GlowLayer,
+  HDRCubeTexture,
   HemisphericLight,
   Mesh,
   MeshBuilder,
@@ -22,6 +23,7 @@ import {
   sizeInUnits,
   type HeadlightMode,
   type HumanAnimation,
+  type PaintFinish,
   type HumanBody,
   type SizeKey,
   type VehicleModelKey,
@@ -48,6 +50,8 @@ export interface SandboxStats {
   vehicle?: VehicleStats;
   vehicleError?: string;
   driving: boolean;
+  /** Walking to the door, opening it, sitting down or climbing out. */
+  boarding: boolean;
   /** Close enough to the car to get in with E. */
   nearVehicle: boolean;
   night: boolean;
@@ -69,9 +73,20 @@ const GROUND_SIZE = 200;
 const CAMERA_TARGET_HEIGHT = 1.1;
 const DRIVING_CAMERA_RADIUS = 9;
 const ENTER_DISTANCE = 1.5; // metres from the car's outline to get in
+const EXIT_MAX_SPEED = 10 / 3.6; // m/s; you can't step out of a moving car
+// Where the pelvis sits relative to the character's origin in the driving clip (measured).
+const SEATED_HIP_HEIGHT = 0.69;
+const SEATED_HIP_BACK = 0.19;
+const DOOR_OPEN_SECONDS = 1.2; // how much of the reach-and-pull "interact" clip to play at the door
 
-const DAY = { sky: new Color4(0.55, 0.7, 0.85, 1), hemi: 0.7, sun: 1.6, ground: new Color3(0.42, 0.5, 0.42) };
-const NIGHT = { sky: new Color4(0.02, 0.03, 0.07, 1), hemi: 0.06, sun: 0.04, ground: new Color3(0.3, 0.33, 0.36) };
+/** Getting in and out, step by step. */
+type Boarding =
+  | { phase: 'toDoor'; elapsed: number }
+  | { phase: 'opening'; left: number }
+  | { phase: 'sitting' | 'standing'; t: number; duration: number; from: Vector3; fromHeading: number };
+
+const DAY = { sky: new Color4(0.55, 0.7, 0.85, 1), hemi: 0.7, sun: 1.6, env: 1, ground: new Color3(0.42, 0.5, 0.42) };
+const NIGHT = { sky: new Color4(0.02, 0.03, 0.07, 1), hemi: 0.06, sun: 0.04, env: 0.05, ground: new Color3(0.3, 0.33, 0.36) };
 
 // Real-size props from the scale catalog, placed around the spawn to judge proportions.
 const REFERENCES: { key: SizeKey; label: string; x: number; z: number; color: string }[] = [
@@ -112,6 +127,7 @@ export class MovementSandbox {
   private vehicle?: SandboxVehicle;
   private vehicleError?: string;
   private driving = false;
+  private boarding?: Boarding;
   private night = false;
 
   constructor(canvas: HTMLCanvasElement) {
@@ -139,6 +155,9 @@ export class MovementSandbox {
     // Lamps glow through their emissive colour; this layer adds the bloom around them.
     const glow = new GlowLayer('glow', this.scene, { blurKernelSize: 48 });
     glow.intensity = 0.9;
+    // Sky reflections: metallic and clear-coated paint (and every glTF material) light from this.
+    this.scene.environmentTexture = new HDRCubeTexture('/assets/environment/sky.hdr', this.scene, 256, false, true, false, true);
+    this.scene.environmentIntensity = DAY.env;
 
     this.createGround();
     this.createReferences();
@@ -202,18 +221,27 @@ export class MovementSandbox {
 
   resetPosition() {
     if (!this.character) return;
-    if (this.driving) this.exitVehicle();
+    this.detachDriver();
+    this.driving = false;
+    this.boarding = undefined;
+    this.character.root.setEnabled(true);
+    this.character.root.rotation.set(0, 0, 0);
+    this.character.play('idle');
     this.character.root.position.set(0, 0, 0);
     this.velocityY = 0;
     this.grounded = true;
   }
 
   setVehicleModel(model: VehicleModelKey) {
-    void this.vehicle?.setModel(model);
+    void this.rebuildVehicle((vehicle) => vehicle.setModel(model));
   }
 
   setVehiclePaint(hex: string) {
     this.vehicle?.setPaint(hex);
+  }
+
+  setPaintFinish(finish: PaintFinish) {
+    this.vehicle?.setFinish(finish);
   }
 
   setHeadlights(mode: HeadlightMode) {
@@ -225,7 +253,40 @@ export class MovementSandbox {
   }
 
   respawnVehicle() {
-    void this.vehicle?.respawn();
+    void this.rebuildVehicle((vehicle) => vehicle.respawn());
+  }
+
+  // Swapping or respawning the car replaces its scene nodes; take the driver off first so they
+  // aren't disposed with the old car, then put them back in the new one.
+  private async rebuildVehicle(action: (vehicle: SandboxVehicle) => Promise<void>) {
+    const vehicle = this.vehicle;
+    if (!vehicle || !this.character) return;
+    if (this.boarding) {
+      this.boarding = undefined;
+      this.character.root.setEnabled(true);
+      this.character.play('idle');
+    }
+    const wasDriving = this.driving;
+    this.detachDriver();
+    await action(vehicle);
+    if (wasDriving) this.attachDriver(vehicle);
+  }
+
+  private attachDriver(vehicle: SandboxVehicle) {
+    const root = this.character!.root;
+    root.parent = vehicle.root!;
+    root.position.set(vehicle.seat.x, vehicle.seat.y - SEATED_HIP_HEIGHT, vehicle.seat.z + SEATED_HIP_BACK);
+    root.rotation.set(0, 0, 0);
+    root.setEnabled(vehicle.driverVisible);
+    this.character!.play('driving');
+  }
+
+  private detachDriver() {
+    const root = this.character?.root;
+    if (!root?.parent) return;
+    const world = root.getAbsolutePosition().clone();
+    root.parent = null;
+    root.position.copyFrom(world);
   }
 
   setNight(night: boolean) {
@@ -234,15 +295,20 @@ export class MovementSandbox {
     this.scene.clearColor = look.sky;
     this.hemi.intensity = look.hemi;
     this.sun.intensity = look.sun;
+    this.scene.environmentIntensity = look.env;
     this.groundMaterial?.diffuseColor.copyFrom(look.ground);
     // Nobody drives at night with the lights off.
     if (night && this.vehicle?.getStats(this.driving).headlights === 'off') this.vehicle.setHeadlights('low');
   }
 
-  /** Gets in when close to the car, out when driving. */
+  /** Walks to the door and gets in when close to the car; gets out when driving slowly enough. */
   toggleVehicle() {
-    if (this.driving) this.exitVehicle();
-    else if (this.isNearVehicle()) this.enterVehicle();
+    if (this.boarding || !this.vehicle || !this.character) return;
+    if (this.driving) {
+      if (Math.abs(this.vehicle.getStats(true).speedKmh) / 3.6 <= EXIT_MAX_SPEED) this.exitVehicle();
+    } else if (this.isNearVehicle()) {
+      this.boarding = { phase: 'toDoor', elapsed: 0 };
+    }
   }
 
   getStats(): SandboxStats {
@@ -262,7 +328,8 @@ export class MovementSandbox {
       vehicle: this.vehicle?.getStats(this.driving),
       vehicleError: this.vehicleError,
       driving: this.driving,
-      nearVehicle: !this.driving && this.isNearVehicle(),
+      boarding: !!this.boarding,
+      nearVehicle: !this.driving && !this.boarding && this.isNearVehicle(),
       night: this.night,
     };
   }
@@ -303,6 +370,10 @@ export class MovementSandbox {
       vehicle.input.steer = this.driving ? input.right : 0;
       vehicle.input.handbrake = this.driving && this.keys.has('Space');
       vehicle.update(dt);
+      if (this.boarding) {
+        this.updateBoarding(vehicle, dt);
+        return;
+      }
       if (this.driving) {
         this.followVehicle(vehicle, dt);
         return;
@@ -375,25 +446,103 @@ export class MovementSandbox {
     return !!root && !!this.vehicle && this.vehicle.distanceTo(root.position) < ENTER_DISTANCE;
   }
 
-  private enterVehicle() {
-    if (!this.vehicle || !this.character) return;
-    this.driving = true;
+  /**
+   * Getting in: walk to the driver's door, open it (the "interact" reach-and-pull), turn and sit
+   * into the seat, then ride along parented to the car. None of the current models have doors as
+   * separate parts, so the door itself doesn't swing; the character's motion sells it. Bikes skip
+   * the door. Getting out plays it backwards.
+   */
+  private updateBoarding(vehicle: SandboxVehicle, dt: number) {
+    const character = this.character!;
+    const root = character.root;
+    const board = this.boarding!;
+    const saddle = vehicle.seat.x === 0;
+    const door = vehicle.exitPoint();
+
+    if (board.phase === 'toDoor') {
+      board.elapsed += dt;
+      const to = new Vector3(door.x - root.position.x, 0, door.z - root.position.z);
+      const distance = to.length();
+      const step = HUMAN_METRICS.walkSpeed * dt;
+      if (distance > step && board.elapsed < 4) {
+        root.position.addInPlace(to.scale(step / distance));
+        root.rotation.y = turnToward(root.rotation.y, Math.atan2(to.x, to.z), dt);
+        character.play('walk');
+      } else {
+        root.position.set(door.x, 0, door.z);
+        if (saddle) {
+          this.startSitting(vehicle);
+        } else {
+          this.boarding = { phase: 'opening', left: Math.min(character.duration('interact'), DOOR_OPEN_SECONDS) };
+          character.play('interact', { restart: true });
+        }
+      }
+    } else if (board.phase === 'opening') {
+      // Face the car side: the door is on the car's left, so look along the car's right.
+      const facing = Math.atan2(-Math.cos(door.heading), Math.sin(door.heading));
+      root.rotation.y = turnToward(root.rotation.y, facing, dt);
+      board.left -= dt;
+      if (board.left <= 0) this.startSitting(vehicle);
+    } else {
+      board.t = Math.min(board.duration, board.t + dt);
+      const k = smoothstep(board.t / board.duration);
+      if (board.phase === 'sitting') {
+        const seat = this.seatWorld(vehicle);
+        root.position.copyFrom(Vector3.Lerp(board.from, seat, k));
+        root.rotation.y = lerpAngle(board.fromHeading, vehicle.heading, k);
+        if (board.t >= board.duration) {
+          this.attachDriver(vehicle);
+          this.boarding = undefined;
+          this.driving = true;
+          this.camera.radius = Math.max(this.camera.radius, DRIVING_CAMERA_RADIUS);
+        }
+      } else {
+        root.position.copyFrom(Vector3.Lerp(board.from, new Vector3(door.x, 0, door.z), k));
+        if (board.t >= board.duration) {
+          this.boarding = undefined;
+          this.grounded = true;
+          this.velocityY = 0;
+          character.play('idle');
+        }
+      }
+    }
+    const target = root.getAbsolutePosition().add(new Vector3(0, CAMERA_TARGET_HEIGHT, 0));
+    this.camera.target.copyFrom(Vector3.Lerp(this.camera.target, target, 1 - Math.exp(-10 * dt)));
+  }
+
+  private startSitting(vehicle: SandboxVehicle) {
+    const character = this.character!;
+    const duration = Math.min(Math.max(character.duration('sitDown'), 0.6), 1.2);
+    this.boarding = {
+      phase: 'sitting',
+      t: 0,
+      duration,
+      from: character.root.position.clone(),
+      fromHeading: character.root.rotation.y,
+    };
+    character.play('sitDown', { restart: true, then: 'driving' });
     this.speed = 0;
-    this.character.root.setEnabled(false);
-    this.camera.radius = Math.max(this.camera.radius, DRIVING_CAMERA_RADIUS);
+    // Hold the car still while someone climbs in.
+    vehicle.input.throttle = 0;
+  }
+
+  /** Where the character's origin goes when seated, in world space. */
+  private seatWorld(vehicle: SandboxVehicle): Vector3 {
+    const { x, y, z } = vehicle.seat;
+    return Vector3.TransformCoordinates(new Vector3(x, y - SEATED_HIP_HEIGHT, z + SEATED_HIP_BACK), vehicle.root!.getWorldMatrix());
   }
 
   private exitVehicle() {
     if (!this.vehicle || !this.character) return;
-    this.driving = false;
-    const { x, z, heading } = this.vehicle.exitPoint();
     const root = this.character.root;
-    root.position.set(x, 0, z);
-    root.rotation.y = heading;
+    this.detachDriver();
+    const world = root.position.clone();
+    root.rotation.set(0, this.vehicle.heading, 0);
     root.setEnabled(true);
-    this.grounded = true;
-    this.velocityY = 0;
-    this.character.play('idle');
+    this.driving = false;
+    const duration = Math.min(Math.max(this.character.duration('standUp'), 0.6), 1.2);
+    this.boarding = { phase: 'standing', t: 0, duration, from: world, fromHeading: this.vehicle.heading };
+    this.character.play('standUp', { restart: true, then: 'idle' });
   }
 
   private jump() {
@@ -505,6 +654,15 @@ export class MovementSandbox {
 function referenceBlock(ref: (typeof REFERENCES)[number]) {
   const size = sizeInUnits(ref.key);
   return { x: ref.x, z: ref.z, width: size.length, depth: size.width, height: size.height };
+}
+
+function smoothstep(t: number) {
+  const x = Math.min(1, Math.max(0, t));
+  return x * x * (3 - 2 * x);
+}
+
+function lerpAngle(from: number, to: number, t: number) {
+  return from + Math.atan2(Math.sin(to - from), Math.cos(to - from)) * t;
 }
 
 function turnToward(from: number, to: number, dt: number) {

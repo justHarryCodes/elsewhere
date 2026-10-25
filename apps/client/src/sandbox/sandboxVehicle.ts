@@ -1,5 +1,6 @@
 import {
   Color3,
+  InstancedMesh,
   type Mesh,
   MeshBuilder,
   Quaternion,
@@ -9,9 +10,11 @@ import {
   type Vector3,
 } from '@babylonjs/core';
 import {
-  VEHICLE_MODELS,
   VehicleLights,
+  vehicleFeatures,
+  vehicleGeometry,
   type HeadlightMode,
+  type PaintFinish,
   type VehicleModelKey,
   type VehicleSnapshot,
 } from '@game/shared';
@@ -47,7 +50,10 @@ export interface StaticBlock {
 
 export interface VehicleStats {
   model: VehicleModelKey;
+  /** #rrggbb, or "" while the car shows the model's own colour. */
   paint: string;
+  finish: PaintFinish;
+  features: ReturnType<typeof vehicleFeatures>;
   speedKmh: number;
   gear: 'P' | 'R' | 'N' | 'D';
   headlights: HeadlightMode;
@@ -66,7 +72,8 @@ export class SandboxVehicle {
   private snapshot?: VehicleSnapshot;
   private accumulator = 0;
   private model: VehicleModelKey = 'policeCar';
-  private paint: string = VEHICLE_MODELS.policeCar.paint;
+  private paint = '';
+  private finish: PaintFinish = 'metallic';
   private headlights: HeadlightMode = 'off';
   private siren = false;
   private loading?: Promise<void>;
@@ -146,18 +153,33 @@ export class SandboxVehicle {
     return Math.atan2(2 * (s.qw * s.qy + s.qx * s.qz), 1 - 2 * (s.qy * s.qy + s.qx * s.qx));
   }
 
+  /** Driver's seat (hips), in the car's own frame: +Z forward, +X left, y up from the ground. */
+  get seat() {
+    return vehicleGeometry(this.model).seat;
+  }
+
+  /** Whether the driver should be drawn: through glass, or astride a bike. */
+  get driverVisible() {
+    return vehicleFeatures(this.model).glass || vehicleGeometry(this.model).seat.x === 0;
+  }
+
   /** Where the driver stands after getting out: beside the driver's (left) door. */
   exitPoint(): { x: number; z: number; heading: number } {
     const s = this.snapshot!;
     const yaw = this.heading;
     const side = this.halfWidth + 0.6;
-    return { x: s.x + side * Math.cos(yaw), z: s.z - side * Math.sin(yaw), heading: yaw };
+    const along = this.seat.z; // level with the seat, so the driver steps straight in
+    return {
+      x: s.x + side * Math.cos(yaw) + along * Math.sin(yaw),
+      z: s.z - side * Math.sin(yaw) + along * Math.cos(yaw),
+      heading: yaw,
+    };
   }
 
   async setModel(model: VehicleModelKey) {
     if (model === this.model) return;
     this.model = model;
-    this.paint = VEHICLE_MODELS[model].paint;
+    this.paint = '';
     const s = this.snapshot;
     await this.spawn(s ? { x: s.x, z: s.z } : { x: -4, z: 6 }, this.heading);
   }
@@ -166,6 +188,12 @@ export class SandboxVehicle {
     this.paint = hex;
     const car = this.sim.bodies.get(CAR)?.vehicle;
     if (car) car.paint = hex;
+  }
+
+  setFinish(finish: PaintFinish) {
+    this.finish = finish;
+    const car = this.sim.bodies.get(CAR)?.vehicle;
+    if (car) car.finish = finish;
   }
 
   setHeadlights(mode: HeadlightMode) {
@@ -192,10 +220,13 @@ export class SandboxVehicle {
     const s = this.snapshot;
     const speed = s?.speed ?? 0;
     const reversing = !!s && (s.lights & VehicleLights.Reverse) !== 0;
-    const hasSiren = !!VEHICLE_MODELS[this.model].rig.materials.sirenA;
+    const features = vehicleFeatures(this.model);
+    const hasSiren = features.siren;
     return {
       model: this.model,
       paint: this.paint,
+      finish: this.finish,
+      features,
       speedKmh: Math.abs(speed) * 3.6,
       gear: !driving ? 'P' : reversing || speed < -0.5 ? 'R' : this.input.throttle > 0 || speed > 0.5 ? 'D' : 'N',
       headlights: this.headlights,
@@ -215,7 +246,7 @@ export class SandboxVehicle {
     const run = async () => {
       const visual = await this.library.createVehicle(this.model, CAR);
       if (this.sim.bodies.has(CAR)) removeEntity(this.sim, CAR);
-      addVehicle(this.sim, CAR, this.model, { x: at.x, y: 0, z: at.z }, { yaw, paint: this.paint });
+      addVehicle(this.sim, CAR, this.model, { x: at.x, y: 0, z: at.z }, { yaw, paint: this.paint, finish: this.finish });
       setHeadlights(this.sim, CAR, this.headlights);
       setSiren(this.sim, CAR, this.siren);
       indexColliders(this.sim);
@@ -223,7 +254,7 @@ export class SandboxVehicle {
       this.visual = visual;
       for (const mesh of visual.meshes) {
         this.shadows.addShadowCaster(mesh);
-        mesh.receiveShadows = true;
+        if (!(mesh instanceof InstancedMesh)) mesh.receiveShadows = true; // instances follow their source
       }
       this.snapshot = vehicleSnapshot(this.sim, CAR) ?? undefined;
       if (this.snapshot) visual.apply(this.snapshot, 0);
