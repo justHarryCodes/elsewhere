@@ -41,6 +41,9 @@ import { VehicleLibrary, type VehicleVisual } from '../game/babylon/vehicles';
 
 const CAR = 'car';
 const WALKER_RADIUS = 0.3; // about shoulder half-width
+const SKIN = 0.02; // gap the controller keeps from surfaces
+const STEP_HEIGHT = 0.35; // highest step walked up without jumping (a standard stair is 0.18)
+const PLAYER_MASS = 80; // kg, for pushing crates
 const MAX_STEPS_PER_FRAME = 5; // never spiral: drop time rather than run 10 steps after a stall
 const CRATE = { x: 12, z: 18, size: 1 };
 
@@ -100,6 +103,7 @@ export class SandboxVehicle {
     const sandbox = new SandboxVehicle(scene, shadows, sim, new VehicleLibrary(scene));
     sandbox.addRamp();
     sandbox.addCrates();
+    sandbox.addStairs();
     sandbox.addWalker();
     enablePhysicsEvents(sim);
     await sandbox.spawn({ x: -4, z: 6 }, 0);
@@ -111,8 +115,9 @@ export class SandboxVehicle {
   }
 
   // ------------------------------------------------------------------ the walking character
-  // The character is drawn by Babylon but collides through a capsule in this physics world, moved
-  // by Rapier's character controller: it stops at cars, walls and crates and slides along them.
+  // The character is drawn by Babylon but moves through a capsule in this physics world, driven by
+  // Rapier's character controller: it is blocked by cars, walls and crates (sliding along them),
+  // walks up ramps and slopes, climbs steps, falls off edges and lands on whatever is below.
 
   private walker?: { body: RigidBody; collider: Collider; controller: KinematicCharacterController };
 
@@ -126,41 +131,40 @@ export class SandboxVehicle {
       RAPIER.ColliderDesc.capsule(halfHeight, radius).setTranslation(0, halfHeight + radius, 0),
       body,
     );
-    const controller = world.createCharacterController(0.02);
+    const controller = world.createCharacterController(SKIN);
     controller.setUp({ x: 0, y: 1, z: 0 });
     controller.setSlideEnabled(true);
-    controller.setApplyImpulsesToDynamicBodies(true); // walking into a crate nudges it
+    controller.setMaxSlopeClimbAngle((45 * Math.PI) / 180); // steeper than this is a wall
+    controller.setMinSlopeSlideAngle((50 * Math.PI) / 180);
+    controller.enableAutostep(STEP_HEIGHT, 0.15, false); // stairs and kerbs, not crates
+    controller.enableSnapToGround(0.3); // stay on the ground walking down slopes and steps
+    controller.setApplyImpulsesToDynamicBodies(true); // walking into a crate pushes it
+    controller.setCharacterMass(PLAYER_MASS);
     this.walker = { body, collider, controller };
   }
 
   /**
-   * Moves the character by `delta` (metres, horizontal) from `from` and returns where it may go:
-   * blocked by cars, walls and crates, sliding along them.
+   * Moves the character by `delta` (metres; y includes gravity and jumps) from `from`, and returns
+   * where it ends up and whether it is standing on something.
    */
-  moveWalker(from: Vector3, delta: Vector3): Vector3 {
+  moveWalker(from: Vector3, delta: Vector3): { position: Vector3; grounded: boolean } {
     const walker = this.walker;
-    if (!walker) return from.add(delta);
-    walker.body.setTranslation({ x: from.x, y: from.y + 0.02, z: from.z }, false);
-    walker.controller.computeColliderMovement(walker.collider, { x: delta.x, y: 0, z: delta.z });
+    if (!walker) {
+      const to = from.add(delta);
+      to.y = Math.max(0, to.y);
+      return { position: to, grounded: to.y <= 0 };
+    }
+    walker.body.setTranslation({ x: from.x, y: from.y, z: from.z }, false);
+    walker.controller.computeColliderMovement(walker.collider, { x: delta.x, y: delta.y, z: delta.z });
     const m = walker.controller.computedMovement();
-    const to = new Vector3(from.x + m.x, from.y, from.z + m.z);
-    walker.body.setNextKinematicTranslation({ x: to.x, y: to.y + 0.02, z: to.z });
-    return to;
+    const to = new Vector3(from.x + m.x, from.y + m.y, from.z + m.z);
+    walker.body.setNextKinematicTranslation({ x: to.x, y: to.y, z: to.z });
+    return { position: to, grounded: walker.controller.computedGrounded() };
   }
 
-  /** Keeps the capsule where the character is (after a teleport) without moving through anything. */
+  /** Keeps the capsule where the character is (after a teleport). */
   placeWalker(at: Vector3) {
-    this.walker?.body.setTranslation({ x: at.x, y: at.y + 0.02, z: at.z }, false);
-  }
-
-  /**
-   * Pushes a standing character out of anything that has moved into them (a car driving into a
-   * person shoves them aside instead of passing through).
-   */
-  separateWalker(at: Vector3): Vector3 {
-    const walker = this.walker;
-    if (!walker || !walker.collider.isEnabled()) return at;
-    return this.moveWalker(at, Vector3.Zero());
+    this.walker?.body.setTranslation({ x: at.x, y: at.y, z: at.z }, false);
   }
 
   /** The capsule is off while driving (the driver rides inside the car). */
@@ -365,6 +369,31 @@ export class SandboxVehicle {
     mesh.material = material;
     mesh.receiveShadows = true;
     this.shadows.addShadowCaster(mesh);
+  }
+
+  /** Ten 18 cm steps up to a 1.8 m platform, beside the ramp: real stair dimensions to walk on. */
+  private addStairs() {
+    const material = new StandardMaterial('stairs-mat', this.scene);
+    material.diffuseColor = new Color3(0.62, 0.62, 0.66);
+    const rise = HUMAN_METRICS.stepHeight;
+    const run = 0.3;
+    const width = 2;
+    const x = -22;
+    const z0 = 14;
+    const box = (id: string, cx: number, cy: number, cz: number, w: number, h: number, d: number) => {
+      addStaticBox(this.sim, id, { x: cx, y: cy, z: cz }, { x: w / 2, y: h / 2, z: d / 2 }, 'concrete');
+      const mesh = MeshBuilder.CreateBox(id, { width: w, height: h, depth: d }, this.scene);
+      mesh.position.set(cx, cy, cz);
+      mesh.material = material;
+      mesh.receiveShadows = true;
+      this.shadows.addShadowCaster(mesh);
+    };
+    for (let i = 0; i < 10; i++) {
+      const h = rise * (i + 1);
+      box(`step-${i}`, x, h / 2, z0 + i * run + run / 2, width, h, run);
+    }
+    const top = rise * 10;
+    box('platform', x, top / 2, z0 + 10 * run + 2, width + 2, top, 4);
   }
 
   private addCrates() {

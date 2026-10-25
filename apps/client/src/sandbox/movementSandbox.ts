@@ -88,6 +88,7 @@ const SEATED_HEAD_TOP = 1.49;
 // The clip is a chair-height sitting pose; a car seat is lower, so the legs would poke out under the
 // car. Everything of the driver below this height (car frame) is cut away; it's inside the body anyway.
 const DRIVER_CLIP_HEIGHT = 0.3;
+const MAX_FALL_SPEED = 50; // m/s, terminal velocity of a falling person
 const DOOR_OPEN_SECONDS = 1.2; // how much of the reach-and-pull "interact" clip to play at the door
 
 /** Getting in and out, step by step. */
@@ -484,28 +485,30 @@ export class MovementSandbox {
     this.speed = moving ? MOVE_SPEEDS[this.moveMode] : 0;
     if (moving) {
       move.normalize();
-      // Walls, cars and crates block the way (the physics capsule decides how far we get).
-      const step = move.scale(this.speed * dt);
-      root.position.copyFrom(this.vehicle ? this.vehicle.moveWalker(root.position, step) : root.position.add(step));
-      const half = GROUND_SIZE / 2 - 1;
-      root.position.x = Math.max(-half, Math.min(half, root.position.x));
-      root.position.z = Math.max(-half, Math.min(half, root.position.z));
       root.rotation.y = turnToward(root.rotation.y, Math.atan2(move.x, move.z), dt);
-    } else if (this.vehicle) {
-      // Standing still: a car rolling into us shoves us aside rather than passing through.
-      root.position.copyFrom(this.vehicle.separateWalker(root.position));
     }
 
-    // Vertical motion: jump with real gravity, land back on y = 0.
-    if (!this.grounded) {
-      this.velocityY += GRAVITY * dt;
-      root.position.y += this.velocityY * dt;
-      if (root.position.y <= 0) {
-        root.position.y = 0;
-        this.velocityY = 0;
-        this.grounded = true;
-        if (!moving) character.play('jumpLand', { then: 'idle' });
-      }
+    // One physics move: walking plus gravity. The capsule is blocked by cars, walls and crates,
+    // walks up the ramp and stairs, and lands on whatever is below.
+    this.velocityY = Math.max(this.velocityY + GRAVITY * dt, -MAX_FALL_SPEED);
+    const step = new Vector3(move.x * this.speed * dt, this.velocityY * dt, move.z * this.speed * dt);
+    const result = this.vehicle?.moveWalker(root.position, step) ?? {
+      position: root.position.add(step),
+      grounded: root.position.y + step.y <= 0,
+    };
+    const half = GROUND_SIZE / 2 - 1;
+    root.position.set(
+      Math.max(-half, Math.min(half, result.position.x)),
+      Math.max(0, result.position.y),
+      Math.max(-half, Math.min(half, result.position.z)),
+    );
+    const wasGrounded = this.grounded;
+    this.grounded = result.grounded || root.position.y <= 0;
+    if (this.grounded && this.velocityY < 0) this.velocityY = 0;
+    if (this.grounded && !wasGrounded) {
+      if (!moving) character.play('jumpLand', { then: 'idle' });
+    } else if (!this.grounded && wasGrounded && this.velocityY <= 0) {
+      character.play('jumpLoop'); // walked off an edge
     }
 
     // Animation state: airborne keeps the jump chain, moving overrides actions, otherwise

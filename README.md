@@ -75,7 +75,8 @@ The header toggle switches between the Babylon.js and Three.js renderers.
 - The sky (`public/assets/environment/sky.hdr`, from `scripts/environment/make_sky_hdr.py`) lights every PBR material
   and gives paint its reflections.
 - Try it in `/sandbox`: walk to the car and press **E**: the character walks to the door, opens it and gets in
-  (hidden while driving: the cars have no interior). The character collides with cars, walls and crates.
+  (hidden while driving: the cars have no interior). The character is fully physical: blocked by cars, walls and
+  crates (and pushes crates), walks up the ramp and the staircase, falls off edges and lands on what is below.
   W/S throttle and brake (hold S to reverse), A/D steer, Space handbrake, **L** headlights, **K** siren, **N** night,
   stop and **E** to get out.
 
