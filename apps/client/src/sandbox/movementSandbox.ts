@@ -235,6 +235,8 @@ export class MovementSandbox {
       const door = this.vehicle.exitPoint();
       root.position.set(door.x, 0, door.z);
       root.rotation.set(0, door.heading, 0);
+      this.vehicle.setWalkerEnabled(true);
+      this.vehicle.placeWalker(root.position);
     }
   }
 
@@ -267,6 +269,8 @@ export class MovementSandbox {
     this.character.root.rotation.set(0, 0, 0);
     this.character.play('idle');
     this.character.root.position.set(0, 0, 0);
+    this.vehicle?.setWalkerEnabled(true);
+    this.vehicle?.placeWalker(this.character.root.position);
     this.velocityY = 0;
     this.grounded = true;
   }
@@ -317,6 +321,7 @@ export class MovementSandbox {
     root.position.copyFrom(this.seatedOrigin(vehicle));
     root.rotation.set(0, 0, 0);
     root.setEnabled(vehicle.driverVisible);
+    vehicle.setWalkerEnabled(false);
     this.character!.play('driving');
     this.clipDriver(vehicle);
   }
@@ -479,11 +484,16 @@ export class MovementSandbox {
     this.speed = moving ? MOVE_SPEEDS[this.moveMode] : 0;
     if (moving) {
       move.normalize();
-      root.position.addInPlace(move.scale(this.speed * dt));
+      // Walls, cars and crates block the way (the physics capsule decides how far we get).
+      const step = move.scale(this.speed * dt);
+      root.position.copyFrom(this.vehicle ? this.vehicle.moveWalker(root.position, step) : root.position.add(step));
       const half = GROUND_SIZE / 2 - 1;
       root.position.x = Math.max(-half, Math.min(half, root.position.x));
       root.position.z = Math.max(-half, Math.min(half, root.position.z));
       root.rotation.y = turnToward(root.rotation.y, Math.atan2(move.x, move.z), dt);
+    } else if (this.vehicle) {
+      // Standing still: a car rolling into us shoves us aside rather than passing through.
+      root.position.copyFrom(this.vehicle.separateWalker(root.position));
     }
 
     // Vertical motion: jump with real gravity, land back on y = 0.
@@ -506,9 +516,11 @@ export class MovementSandbox {
       else if (!current || LOCOMOTION.has(current)) character.play('idle');
     }
 
-    // Camera follows the character; orbit and zoom stay under mouse control.
+    // Camera follows the character; orbit and zoom stay under mouse control. The target is moved in
+    // place: assigning camera.target would swing the orbit angle round as we walk (and since walking
+    // is camera-relative, strafing would then walk in circles).
     const target = root.position.add(new Vector3(0, CAMERA_TARGET_HEIGHT, 0));
-    this.camera.target = Vector3.Lerp(this.camera.target, target, 1 - Math.exp(-10 * dt));
+    this.camera.target.copyFrom(Vector3.Lerp(this.camera.target, target, 1 - Math.exp(-10 * dt)));
   }
 
   // Chase camera: target rides with the car and the orbit swings round behind it. Mouse drag still
@@ -572,8 +584,8 @@ export class MovementSandbox {
       board.t = Math.min(board.duration, board.t + dt);
       const k = smoothstep(board.t / board.duration);
       if (board.phase === 'sitting') {
-        const seat = this.seatWorld(vehicle);
-        root.position.copyFrom(Vector3.Lerp(board.from, seat, k));
+        // Step into the door opening while sitting down, then the car takes over.
+        root.position.copyFrom(Vector3.Lerp(board.from, this.doorwayWorld(vehicle), k));
         root.rotation.y = lerpAngle(board.fromHeading, vehicle.heading, k);
         if (board.t >= board.duration) {
           this.attachDriver(vehicle);
@@ -583,7 +595,10 @@ export class MovementSandbox {
         }
       } else {
         root.position.copyFrom(Vector3.Lerp(board.from, new Vector3(door.x, 0, door.z), k));
+        root.rotation.y = lerpAngle(board.fromHeading, door.heading, k);
         if (board.t >= board.duration) {
+          vehicle.setWalkerEnabled(true);
+          vehicle.placeWalker(root.position);
           this.boarding = undefined;
           this.grounded = true;
           this.velocityY = 0;
@@ -612,6 +627,13 @@ export class MovementSandbox {
   }
 
   /** Where the character's origin goes when seated, in world space. */
+  /** Halfway into the driver's door, on the ground. */
+  private doorwayWorld(vehicle: SandboxVehicle): Vector3 {
+    const door = vehicle.exitPoint();
+    const seat = this.seatWorld(vehicle);
+    return Vector3.Lerp(new Vector3(door.x, 0, door.z), new Vector3(seat.x, 0, seat.z), 0.45);
+  }
+
   private seatWorld(vehicle: SandboxVehicle): Vector3 {
     return Vector3.TransformCoordinates(this.seatedOrigin(vehicle), vehicle.root!.getWorldMatrix());
   }
@@ -620,7 +642,9 @@ export class MovementSandbox {
     if (!this.vehicle || !this.character) return;
     const root = this.character.root;
     this.detachDriver();
-    const world = root.position.clone();
+    // Reappear in the door opening and stand up out of it.
+    const world = this.doorwayWorld(this.vehicle);
+    root.position.copyFrom(world);
     root.rotation.set(0, this.vehicle.heading, 0);
     root.setEnabled(true);
     this.driving = false;

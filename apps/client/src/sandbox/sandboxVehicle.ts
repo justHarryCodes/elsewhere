@@ -1,3 +1,4 @@
+import type { Collider, KinematicCharacterController, RigidBody } from '@dimforge/rapier3d-compat';
 import {
   Color3,
   InstancedMesh,
@@ -7,9 +8,10 @@ import {
   type Scene,
   type ShadowGenerator,
   StandardMaterial,
-  type Vector3,
+  Vector3,
 } from '@babylonjs/core';
 import {
+  HUMAN_METRICS,
   VehicleLights,
   lerpVehicleSnapshot,
   vehicleFeatures,
@@ -38,6 +40,7 @@ import {
 import { VehicleLibrary, type VehicleVisual } from '../game/babylon/vehicles';
 
 const CAR = 'car';
+const WALKER_RADIUS = 0.3; // about shoulder half-width
 const MAX_STEPS_PER_FRAME = 5; // never spiral: drop time rather than run 10 steps after a stall
 const CRATE = { x: 12, z: 18, size: 1 };
 
@@ -97,6 +100,7 @@ export class SandboxVehicle {
     const sandbox = new SandboxVehicle(scene, shadows, sim, new VehicleLibrary(scene));
     sandbox.addRamp();
     sandbox.addCrates();
+    sandbox.addWalker();
     enablePhysicsEvents(sim);
     await sandbox.spawn({ x: -4, z: 6 }, 0);
     return sandbox;
@@ -104,6 +108,64 @@ export class SandboxVehicle {
 
   get root() {
     return this.visual?.root;
+  }
+
+  // ------------------------------------------------------------------ the walking character
+  // The character is drawn by Babylon but collides through a capsule in this physics world, moved
+  // by Rapier's character controller: it stops at cars, walls and crates and slides along them.
+
+  private walker?: { body: RigidBody; collider: Collider; controller: KinematicCharacterController };
+
+  private addWalker() {
+    const { RAPIER, world } = this.sim;
+    const radius = WALKER_RADIUS;
+    const halfHeight = HUMAN_METRICS.height / 2 - radius;
+    const body = world.createRigidBody(RAPIER.RigidBodyDesc.kinematicPositionBased().setTranslation(0, 0, 0));
+    // Feet at the body's origin, like the drawn character.
+    const collider = world.createCollider(
+      RAPIER.ColliderDesc.capsule(halfHeight, radius).setTranslation(0, halfHeight + radius, 0),
+      body,
+    );
+    const controller = world.createCharacterController(0.02);
+    controller.setUp({ x: 0, y: 1, z: 0 });
+    controller.setSlideEnabled(true);
+    controller.setApplyImpulsesToDynamicBodies(true); // walking into a crate nudges it
+    this.walker = { body, collider, controller };
+  }
+
+  /**
+   * Moves the character by `delta` (metres, horizontal) from `from` and returns where it may go:
+   * blocked by cars, walls and crates, sliding along them.
+   */
+  moveWalker(from: Vector3, delta: Vector3): Vector3 {
+    const walker = this.walker;
+    if (!walker) return from.add(delta);
+    walker.body.setTranslation({ x: from.x, y: from.y + 0.02, z: from.z }, false);
+    walker.controller.computeColliderMovement(walker.collider, { x: delta.x, y: 0, z: delta.z });
+    const m = walker.controller.computedMovement();
+    const to = new Vector3(from.x + m.x, from.y, from.z + m.z);
+    walker.body.setNextKinematicTranslation({ x: to.x, y: to.y + 0.02, z: to.z });
+    return to;
+  }
+
+  /** Keeps the capsule where the character is (after a teleport) without moving through anything. */
+  placeWalker(at: Vector3) {
+    this.walker?.body.setTranslation({ x: at.x, y: at.y + 0.02, z: at.z }, false);
+  }
+
+  /**
+   * Pushes a standing character out of anything that has moved into them (a car driving into a
+   * person shoves them aside instead of passing through).
+   */
+  separateWalker(at: Vector3): Vector3 {
+    const walker = this.walker;
+    if (!walker || !walker.collider.isEnabled()) return at;
+    return this.moveWalker(at, Vector3.Zero());
+  }
+
+  /** The capsule is off while driving (the driver rides inside the car). */
+  setWalkerEnabled(on: boolean) {
+    this.walker?.collider.setEnabled(on);
   }
 
   get halfLength() {
@@ -171,9 +233,12 @@ export class SandboxVehicle {
     return vehicleGeometry(this.model).roofTop;
   }
 
-  /** Whether the driver should be drawn: through glass, or astride a bike. */
+  /**
+   * Whether the driver is drawn while driving. The low-poly cars have no interior or seat, so the
+   * driver is hidden once in (as in a car with tinted windows); a rider on a bike would show.
+   */
   get driverVisible() {
-    return vehicleFeatures(this.model).glass || vehicleGeometry(this.model).seat.x === 0;
+    return vehicleGeometry(this.model).seat.x === 0;
   }
 
   /** Where the driver stands after getting out: beside the driver's (left) door. */

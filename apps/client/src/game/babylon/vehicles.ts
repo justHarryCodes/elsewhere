@@ -39,8 +39,7 @@ const REVERSE = new Color3(1, 0.9, 0.88);
 const REVERSE_STRENGTH = 1.6;
 const SIREN_STRENGTH = 1.8; // siren lamps glow in their own colour (red, blue, white)
 const SIREN_PERIOD = 0.6; // seconds for one blue-white cycle
-// Tinted glass: dark and mostly opaque, with sky reflections; the driver shows as a shape inside.
-const GLASS_ALPHA = 0.72;
+// Tinted glass: dark, glossy and opaque (the cars have no interior to show).
 const GLASS_TINT = new Color3(0.02, 0.025, 0.03);
 
 // Real headlight beams (only for the car the player drives; each light costs every lit material).
@@ -193,9 +192,6 @@ export class VehicleVisual {
       material.albedoColor = GLASS_TINT.clone();
       material.metallic = 0;
       material.roughness = 0.05;
-      material.alpha = GLASS_ALPHA;
-      material.transparencyMode = PBRMaterial.MATERIAL_ALPHABLEND;
-      material.backFaceCulling = false;
     }
   }
 

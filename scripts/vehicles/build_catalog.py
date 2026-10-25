@@ -79,6 +79,8 @@ MODELS = [
 # built into the body, odd proportions) or two-wheelers, which need lean physics first. Their entries
 # stay in MODELS so they come back by deleting them from here.
 DISABLED = {
+    # Detailed cars: no interior or seat to put the driver in, so the low-poly set is used for now.
+    'pickup', 'sportsCoupe', 'camaro', 'ferrariF40', 'dodgeChallenger', 'nissan180sx', 'nissanGtr', 'cargoTruck',
     'lamborghini', 'classicMuscle', 'mitsubishiL200', 'camaroZl1', 'cyberPickup', 'hatchbackBlue', 'van',
     'ambulance', 'sushiTruck', 'bus', 'cityBus', 'motorcycle', 'bicycle',
 }

@@ -59,11 +59,11 @@ The header toggle switches between the Babylon.js and Three.js renderers.
 
 ## Vehicles
 
-- **27 drivable models**, every car, truck, bus and bike under `public/assets`. Their per-model data (which way the
-  model faces, body and wheel bounds, which materials are paint / headlights / tail lights / reverse lights / glass /
-  siren) is generated into `packages/shared/src/vehicle-catalog.ts` by `scripts/vehicles/build_catalog.py`. To add a
-  vehicle, put the `.glb` in `public/assets`, add a line to `MODELS` in that script, run
-  `python3 scripts/vehicles/build_catalog.py`, and try it in the sandbox.
+- **Six drivable cars**, the low-poly Quaternius set (police car, sports car, SUV, taxi, hatchback, sedan). The
+  catalog generator also knows the detailed models in `public/assets` (Camaro, F40, Dodge Challenger, Nissans,
+  trucks, buses, bikes...) but they're switched off in `DISABLED` until there are models with interiors and seats
+  for the driver. Per-model data (facing, body and wheel bounds, paint / lamp / glass materials) is generated into
+  `packages/shared/src/vehicle-catalog.ts` by `scripts/vehicles/build_catalog.py`.
 - `packages/shared/src/vehicles.ts` turns that into real-world geometry (scaled to the size catalog) and handling per
   class (compact, sedan, sports, supercar, SUV, pickup, van, truck, bus, motorcycle, bicycle).
 - `packages/shared/src/physics-vehicle.ts` drives them on Rapier's raycast vehicle: engine, front-biased brakes,
@@ -74,7 +74,8 @@ The header toggle switches between the Babylon.js and Three.js renderers.
   (low/high), brake, reverse and siren lamps. Models whose wheels are part of the body still drive, without spinning.
 - The sky (`public/assets/environment/sky.hdr`, from `scripts/environment/make_sky_hdr.py`) lights every PBR material
   and gives paint its reflections.
-- Try it in `/sandbox`: walk to the car and press **E**: the driver walks to the door, opens it, sits in, and drives.
+- Try it in `/sandbox`: walk to the car and press **E**: the character walks to the door, opens it and gets in
+  (hidden while driving: the cars have no interior). The character collides with cars, walls and crates.
   W/S throttle and brake (hold S to reverse), A/D steer, Space handbrake, **L** headlights, **K** siren, **N** night,
   stop and **E** to get out.
 
