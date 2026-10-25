@@ -1,18 +1,35 @@
-// The packed Downtown City MegaKit (scripts/city/pack_megakit.py) and the code that welds placed pieces
-// into one batch of triangles per material. Renderer-neutral: the Babylon and Three.js city renderers
-// both turn these batches into meshes.
+// The city's packed models and the code that welds placed pieces into one batch of triangles per
+// material. Two packs, loaded together: the Downtown City MegaKit (streets, works halls: made by
+// scripts/city/pack_megakit.py) and the town (Ultimate Buildings, Stylized Nature, street props: made by
+// scripts/city/pack_town.py). Renderer-neutral: the Babylon and Three.js city renderers both turn the
+// batches into meshes.
 
 import { type CityPiece, roomLook } from '@game/shared';
 
 const BASE = '/assets/city/megakit/';
+const PACKS = ['/assets/city/megakit/', '/assets/city/town/'];
 
 export interface KitMaterial {
   base: string | null;
-  orm: string | null;
-  normal: string | null;
-  color: [number, number, number, number];
-  blend: boolean;
-  mask: boolean;
+  orm?: string | null;
+  normal?: string | null;
+  color?: [number, number, number, number];
+  /** Transparent (MegaKit glass, street decals). */
+  blend?: boolean;
+  mask?: boolean;
+  /** Leaves and petals: cut out where the texture is clear, seen from both sides. */
+  cutout?: boolean;
+  doubleSided?: boolean;
+  /** Colour comes from the vertices (flat-coloured props). */
+  vertexColors?: boolean;
+  /** A tiny palette texture: sample it without blurring. */
+  pixel?: boolean;
+  /** Alternative palettes with the same layout (building colour schemes), picked per piece by `skin`. */
+  skins?: string[];
+  /** Window glass of the town's buildings (glows at night). */
+  glass?: boolean;
+  /** Folder its textures are in. */
+  dir: string;
 }
 
 interface PackedPart {
@@ -22,12 +39,15 @@ interface PackedPart {
   n: number;
   uv: number;
   i: number;
+  c?: number;
 }
 
 interface KitPart {
   positions: Float32Array;
   normals: Float32Array;
   uvs: Float32Array;
+  /** RGB per vertex, when the material takes its colour from the vertices. */
+  colors?: Float32Array;
   indices: Uint32Array;
 }
 
@@ -42,6 +62,8 @@ export interface Batch {
   positions: Float32Array;
   normals: Float32Array;
   uvs: Float32Array;
+  /** RGBA per vertex, for vertex-coloured materials. */
+  colors?: Float32Array;
   indices: Uint32Array;
 }
 
@@ -67,28 +89,42 @@ export class MegaKit {
   ) {}
 
   static async load(): Promise<MegaKit> {
-    const [index, blob] = await Promise.all([
-      fetch(`${BASE}pieces.json`).then((r) => r.json() as Promise<{ pieces: Record<string, { min: number[]; max: number[]; parts: Record<string, PackedPart>; }>; materials: Record<string, KitMaterial> }>),
-      fetch(`${BASE}pieces.bin`).then((r) => r.arrayBuffer()),
-    ]);
     const pieces = new Map<string, KitPiece>();
-    for (const [name, piece] of Object.entries(index.pieces)) {
-      const parts = new Map<string, KitPart>();
-      for (const [material, p] of Object.entries(piece.parts)) {
-        parts.set(material, {
-          positions: new Float32Array(blob, p.p, p.vertices * 3),
-          normals: new Float32Array(blob, p.n, p.vertices * 3),
-          uvs: new Float32Array(blob, p.uv, p.vertices * 2),
-          indices: new Uint32Array(blob, p.i, p.indices),
-        });
-      }
-      pieces.set(name, { min: piece.min as KitPiece['min'], max: piece.max as KitPiece['max'], parts });
-    }
-    return new MegaKit(pieces, new Map(Object.entries(index.materials)));
+    const materials = new Map<string, KitMaterial>();
+    await Promise.all(
+      PACKS.map(async (dir) => {
+        const [index, blob] = await Promise.all([
+          fetch(`${dir}pieces.json`).then(
+            (r) =>
+              r.json() as Promise<{
+                pieces: Record<string, { min: number[]; max: number[]; parts: Record<string, PackedPart> }>;
+                materials: Record<string, Omit<KitMaterial, 'dir'>>;
+              }>,
+          ),
+          fetch(`${dir}pieces.bin`).then((r) => r.arrayBuffer()),
+        ]);
+        for (const [name, piece] of Object.entries(index.pieces)) {
+          const parts = new Map<string, KitPart>();
+          for (const [material, p] of Object.entries(piece.parts)) {
+            parts.set(material, {
+              positions: new Float32Array(blob, p.p, p.vertices * 3),
+              normals: new Float32Array(blob, p.n, p.vertices * 3),
+              uvs: new Float32Array(blob, p.uv, p.vertices * 2),
+              colors: p.c !== undefined ? new Float32Array(blob, p.c, p.vertices * 3) : undefined,
+              indices: new Uint32Array(blob, p.i, p.indices),
+            });
+          }
+          pieces.set(name, { min: piece.min as KitPiece['min'], max: piece.max as KitPiece['max'], parts });
+        }
+        for (const [name, material] of Object.entries(index.materials)) materials.set(name, { ...material, dir });
+      }),
+    );
+    return new MegaKit(pieces, materials);
   }
 
-  textureUrl(file: string) {
-    return `${BASE}textures/${file}`;
+  /** URL of a texture of a material (`file` defaults to its base colour texture). */
+  textureUrl(material: KitMaterial, file = material.base) {
+    return `${material.dir}textures/${file}`;
   }
 
   /**
@@ -97,12 +133,14 @@ export class MegaKit {
    */
   weld(placements: Iterable<CityPiece>): Map<string, Batch> {
     // First count, so every batch is allocated once at its final size.
-    const sizes = new Map<string, { vertices: number; indices: number }>();
+    const sizes = new Map<string, { vertices: number; indices: number; colors?: boolean }>();
     const keyOf = (material: string, placement: CityPiece) => {
       if (material === 'MI_FakeInterior') {
         const look = roomLook(placement.room ?? 0);
         return look.lit ? ROOM_MATERIALS[look.picture] : 'room-dark';
       }
+      // A building's colour scheme: its own batch, with that palette.
+      if (placement.skin !== undefined && this.materials.get(material)?.skins) return `${material}#${placement.skin}`;
       return READY_MADE_ROOMS[material] ?? material;
     };
     const list = [...placements];
@@ -114,6 +152,7 @@ export class MegaKit {
         const size = sizes.get(key) ?? { vertices: 0, indices: 0 };
         size.vertices += part.positions.length / 3;
         size.indices += part.indices.length;
+        size.colors ||= !!part.colors;
         sizes.set(key, size);
       }
     }
@@ -123,6 +162,7 @@ export class MegaKit {
         positions: new Float32Array(size.vertices * 3),
         normals: new Float32Array(size.vertices * 3),
         uvs: new Float32Array(size.vertices * 2),
+        colors: size.colors ? new Float32Array(size.vertices * 4) : undefined,
         indices: new Uint32Array(size.indices),
         v: 0,
         i: 0,
@@ -134,15 +174,16 @@ export class MegaKit {
       const c = Math.cos(placement.yaw);
       const s = Math.sin(placement.yaw);
       const sx = placement.sx ?? 1;
+      const scale = placement.scale ?? 1;
       for (const [material, part] of piece.parts) {
         const batch = batches.get(keyOf(material, placement))!;
         const base = batch.v;
         const count = part.positions.length / 3;
         for (let k = 0; k < count; k++) {
           // Stretch along the piece's own X, turn about Y, move into place.
-          const px = part.positions[k * 3] * sx;
-          const py = part.positions[k * 3 + 1];
-          const pz = part.positions[k * 3 + 2];
+          const px = part.positions[k * 3] * sx * scale;
+          const py = part.positions[k * 3 + 1] * scale;
+          const pz = part.positions[k * 3 + 2] * scale;
           const o = (base + k) * 3;
           batch.positions[o] = placement.x + px * c + pz * s;
           batch.positions[o + 1] = placement.y + py;
@@ -155,6 +196,13 @@ export class MegaKit {
           batch.normals[o + 2] = -nx * s + nz * c;
           batch.uvs[(base + k) * 2] = part.uvs[k * 2];
           batch.uvs[(base + k) * 2 + 1] = part.uvs[k * 2 + 1];
+          if (batch.colors) {
+            const ci = (base + k) * 4;
+            batch.colors[ci] = part.colors ? part.colors[k * 3] : 1;
+            batch.colors[ci + 1] = part.colors ? part.colors[k * 3 + 1] : 1;
+            batch.colors[ci + 2] = part.colors ? part.colors[k * 3 + 2] : 1;
+            batch.colors[ci + 3] = 1;
+          }
         }
         for (let k = 0; k < part.indices.length; k++) batch.indices[batch.i + k] = base + part.indices[k];
         batch.v += count;

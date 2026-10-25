@@ -41,8 +41,14 @@ const POOL_Y = KERB_HEIGHT + 0.03; // just above the sidewalks, so the light poo
 // that's the front, as Babylon's own glTF loader sets it.
 const FRONT_FACES = Constants.MATERIAL_CounterClockWiseSideOrientation;
 
-// What lit windows glow at night: warm rooms, cool rooms (the two room pictures).
-const ROOM_GLOW: Record<string, Color3> = { 'room-lit-0': new Color3(1, 0.78, 0.5), 'room-lit-1': new Color3(0.65, 0.85, 1) };
+// What lit windows glow at night: warm rooms, cool rooms (the two room pictures), the town's windows.
+const TOWN_GLASS = 'ub-glass';
+const ROOM_GLOW: Record<string, Color3> = {
+  'room-lit-0': new Color3(1, 0.78, 0.5),
+  'room-lit-1': new Color3(0.65, 0.85, 1),
+  [TOWN_GLASS]: new Color3(1, 0.75, 0.42),
+};
+
 
 /** What a city mesh is, for callers that treat them differently (e.g. only neon in a glow layer). */
 export type CityMeshKind = 'ground' | 'building' | 'neon' | 'lamp' | 'pool';
@@ -170,7 +176,7 @@ export class CityRenderer {
   setNight(night: boolean) {
     this.night = night;
     for (const mesh of this.nightOnly) mesh.setEnabled(night);
-    for (const key of ROOM_MATERIALS) {
+    for (const key of [...ROOM_MATERIALS, TOWN_GLASS]) {
       const material = this.materials.get(key);
       if (material) this.applyRoom(key, material);
     }
@@ -289,6 +295,7 @@ export class CityRenderer {
     data.positions = batch.positions;
     data.normals = batch.normals;
     data.uvs = batch.uvs;
+    if (batch.colors) data.colors = batch.colors;
     data.indices = batch.indices;
     data.applyToMesh(mesh, false);
     mesh.material = material;
@@ -325,10 +332,14 @@ export class CityRenderer {
 
   // ------------------------------------------------------------------ materials
 
-  private texture(url: string): Texture {
+  /** A texture by URL, made once. `pixel`: a tiny palette, sampled without blurring between cells. */
+  private texture(url: string, pixel = false): Texture {
     let texture = this.textures.get(url);
     if (!texture) {
-      texture = new Texture(url, this.scene, { invertY: false }); // the kit's UVs are glTF's (not flipped)
+      // The packs' UVs are glTF's (not flipped).
+      texture = pixel
+        ? new Texture(url, this.scene, { invertY: false, noMipmap: true, samplingMode: Texture.NEAREST_SAMPLINGMODE })
+        : new Texture(url, this.scene, { invertY: false });
       this.textures.set(url, texture);
     }
     return texture;
@@ -348,16 +359,19 @@ export class CityRenderer {
       material.roughness = 0.9;
       this.applyRoom(key, material);
     } else {
-      const k = kit.materials.get(key);
-      if (k?.base) material.albedoTexture = this.texture(kit.textureUrl(k.base));
-      else if (k) material.albedoColor = new Color3(k.color[0], k.color[1], k.color[2]);
+      // A building colour scheme: "ub#3" is material "ub" with its fourth palette.
+      const [name, skin] = key.split('#');
+      const k = kit.materials.get(name);
+      const base = skin !== undefined && k?.skins ? k.skins[Number(skin)] : k?.base;
+      if (k && base) material.albedoTexture = this.texture(kit.textureUrl(k, base), k.pixel);
+      else if (k?.color) material.albedoColor = new Color3(k.color[0], k.color[1], k.color[2]);
       if (k?.normal) {
-        material.bumpTexture = this.texture(kit.textureUrl(k.normal));
+        material.bumpTexture = this.texture(kit.textureUrl(k, k.normal));
         // glTF normal maps in a right-handed scene (what Babylon's own glTF loader does).
         material.invertNormalMapY = true;
       }
       if (k?.orm) {
-        material.metallicTexture = this.texture(kit.textureUrl(k.orm));
+        material.metallicTexture = this.texture(kit.textureUrl(k, k.orm));
         material.useAmbientOcclusionFromMetallicTextureRed = true;
         material.useRoughnessFromMetallicTextureGreen = true;
         material.useMetallnessFromMetallicTextureBlue = true;
@@ -365,11 +379,29 @@ export class CityRenderer {
         material.roughness = 1;
       } else {
         material.metallic = 0;
-        material.roughness = 0.6;
+        material.roughness = k?.pixel || k?.dir.includes('/town/') ? 0.85 : 0.6;
+      }
+      if (k?.cutout) {
+        // Leaves and petals: cut out where the texture is clear, both sides drawn.
+        material.useAlphaFromAlbedoTexture = true;
+        if (material.albedoTexture) material.albedoTexture.hasAlpha = true;
+        material.transparencyMode = PBRMaterial.PBRMATERIAL_ALPHATEST;
+        material.alphaCutOff = 0.5;
+        material.backFaceCulling = false;
+        material.twoSidedLighting = true;
+      }
+      if (k?.vertexColors) material.albedoColor = Color3.White(); // the colour is in the vertices
+      if (key === TOWN_GLASS) {
+        // The town's windows: glossy blue-grey glass that glows warm at night.
+        material.roughness = 0.15;
+        material.metallic = 0.1;
+        this.materials.set(key, material);
+        this.applyRoom(key, material);
+        return material;
       }
       if (key === 'MI_Glass') {
         // Dark, glossy glass the rooms show through.
-        material.alpha = k?.color[3] ?? 0.6;
+        material.alpha = k?.color?.[3] ?? 0.6;
         material.roughness = 0.05;
         material.transparencyMode = PBRMaterial.PBRMATERIAL_ALPHABLEND;
       } else if (k?.blend) {
@@ -378,6 +410,7 @@ export class CityRenderer {
         if (material.albedoTexture) material.albedoTexture.hasAlpha = true;
         material.transparencyMode = PBRMaterial.PBRMATERIAL_ALPHATEST;
         material.alphaCutOff = 0.4;
+        material.zOffset = -2; // painted on the asphalt at the same height: drawn just in front of it
       }
       material.freeze();
     }
@@ -422,19 +455,22 @@ export class CityRenderer {
     const surface = (key: string, texture: string, tile: number) => {
       const material = new PBRMaterial(`city-ground-${key}`, this.scene);
       material.sideOrientation = FRONT_FACES;
-      material.albedoTexture = this.texture(kit.textureUrl(texture));
+      material.albedoTexture = this.texture(texture);
       material.metallic = 0;
       material.roughness = 0.95;
       return { material, tile };
     };
-    const concrete = kit.materials.get('MI_Concrete')!;
-    const asphalt = kit.materials.get('MI_Asphalt')!;
-    const dirt = kit.materials.get('MI_Dirt')!;
+    const url = (name: string) => {
+      const m = kit.materials.get(name)!;
+      return kit.textureUrl(m, m.base);
+    };
     const surfaces = {
-      paving: surface('paving', concrete.base!, 6),
-      plaza: surface('plaza', concrete.base!, 3),
-      asphalt: surface('asphalt', asphalt.base!, 8),
-      dirt: surface('dirt', dirt.base!, 6),
+      paving: surface('paving', url('MI_Concrete'), 6),
+      plaza: surface('plaza', url('MI_Concrete'), 3),
+      path: surface('path', url('MI_Concrete'), 2),
+      lawn: surface('lawn', url('town-lawn'), 5),
+      asphalt: surface('asphalt', url('MI_Asphalt'), 8),
+      dirt: surface('dirt', url('MI_Dirt'), 6),
     };
     const quads = new Map<keyof typeof surfaces, { x0: number; z0: number; x1: number; z1: number; y: number }[]>();
     const add = (key: keyof typeof surfaces, r: { x0: number; z0: number; x1: number; z1: number }, y: number) => {
@@ -443,8 +479,16 @@ export class CityRenderer {
       quads.set(key, list);
     };
     for (const b of city.blocks) add('paving', b, KERB_HEIGHT);
-    const kinds: Record<CityLot['kind'], keyof typeof surfaces> = { parking: 'asphalt', yard: 'asphalt', plaza: 'plaza', dirt: 'dirt' };
-    for (const lot of city.lots) add(kinds[lot.kind], lot, KERB_HEIGHT + 0.01);
+    // Laid in layers: lawn over the block's paving, then lots, then paths on top.
+    const kinds: Record<CityLot['kind'], [keyof typeof surfaces, number]> = {
+      lawn: ['lawn', 0.005],
+      parking: ['asphalt', 0.01],
+      yard: ['asphalt', 0.01],
+      plaza: ['plaza', 0.01],
+      dirt: ['dirt', 0.01],
+      path: ['path', 0.015],
+    };
+    for (const lot of city.lots) add(kinds[lot.kind][0], lot, KERB_HEIGHT + kinds[lot.kind][1]);
     for (const [key, list] of quads) {
       const { material, tile } = surfaces[key];
       const mesh = this.quadMesh(`city-ground-${key}`, list, tile);
@@ -485,7 +529,7 @@ export class CityRenderer {
       const { x0, z0, x1, z1 } = city.bounds;
       const margin = 400;
       const ground = this.quadMesh('city-outside', [{ x0: x0 - margin, z0: z0 - margin, x1: x1 + margin, z1: z1 + margin, y: -0.03 }], 10);
-      ground.material = surfaces.dirt.material;
+      ground.material = surfaces.lawn.material;
       this.addGroundMesh(ground);
     }
   }

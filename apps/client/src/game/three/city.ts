@@ -42,19 +42,33 @@ export class CityRenderer {
     if ((ROOM_MATERIALS as readonly string[]).includes(key)) {
       material = new THREE.MeshStandardMaterial({ map: this.texture(ROOM_TEXTURES[key as keyof typeof ROOM_TEXTURES], true), roughness: 0.9 });
     } else {
-      const k = kit.materials.get(key);
+      const [name, skin] = key.split('#');
+      const k = kit.materials.get(name);
       material = new THREE.MeshStandardMaterial({ roughness: 1, metalness: 1 });
-      if (k?.base) material.map = this.texture(kit.textureUrl(k.base), true);
-      else if (k) material.color.setRGB(k.color[0], k.color[1], k.color[2]);
-      if (k?.normal) material.normalMap = this.texture(kit.textureUrl(k.normal), false);
-      if (k?.orm) material.roughnessMap = material.metalnessMap = this.texture(kit.textureUrl(k.orm), false);
-      else material.metalness = 0;
+      const base = skin !== undefined && k?.skins ? k.skins[Number(skin)] : k?.base;
+      if (k && base) {
+        material.map = this.texture(kit.textureUrl(k, base), true);
+        if (k.pixel) material.map.magFilter = material.map.minFilter = THREE.NearestFilter;
+      } else if (k?.color) material.color.setRGB(k.color[0], k.color[1], k.color[2]);
+      if (k?.normal) material.normalMap = this.texture(kit.textureUrl(k, k.normal), false);
+      if (k?.orm) material.roughnessMap = material.metalnessMap = this.texture(kit.textureUrl(k, k.orm), false);
+      else {
+        material.metalness = 0;
+        material.roughness = 0.85;
+      }
+      if (k?.vertexColors) material.vertexColors = true;
+      if (k?.cutout) {
+        material.alphaTest = 0.5;
+        material.side = THREE.DoubleSide;
+      }
       if (key === 'MI_Glass') {
         material.transparent = true;
-        material.opacity = k?.color[3] ?? 0.6;
+        material.opacity = k?.color?.[3] ?? 0.6;
         material.roughness = 0.05;
       } else if (k?.blend) {
         material.alphaTest = 0.4;
+        material.polygonOffset = true; // painted on the asphalt at the same height
+        material.polygonOffsetFactor = -2;
       }
     }
     this.disposables.push(material);
@@ -66,6 +80,7 @@ export class CityRenderer {
     geometry.setAttribute('position', new THREE.BufferAttribute(batch.positions, 3));
     geometry.setAttribute('normal', new THREE.BufferAttribute(batch.normals, 3));
     geometry.setAttribute('uv', new THREE.BufferAttribute(batch.uvs, 2));
+    if (batch.colors) geometry.setAttribute('color', new THREE.BufferAttribute(batch.colors, 4));
     geometry.setIndex(new THREE.BufferAttribute(batch.indices, 1));
     this.disposables.push(geometry);
     const mesh = new THREE.Mesh(geometry, material);
@@ -100,7 +115,8 @@ export class CityRenderer {
   /** Paving on the blocks, asphalt or dirt on the lots, dirt all round. */
   private addGround(city: City, kit: MegaKit) {
     const surface = (material: string, tile: number) => {
-      const map = this.texture(kit.textureUrl(kit.materials.get(material)!.base!), true, true);
+      const source = kit.materials.get(material)!;
+      const map = this.texture(kit.textureUrl(source, source.base), true, true);
       const m = new THREE.MeshStandardMaterial({ map, roughness: 0.95 });
       this.disposables.push(m);
       return { m, tile };
@@ -108,6 +124,8 @@ export class CityRenderer {
     const paving = surface('MI_Concrete', 6);
     const asphalt = surface('MI_Asphalt', 8);
     const dirt = surface('MI_Dirt', 6);
+    const lawn = surface('town-lawn', 5);
+    const path = surface('MI_Concrete', 2);
     const quad = (r: { x0: number; z0: number; x1: number; z1: number }, y: number, s: { m: THREE.Material; tile: number }) => {
       const w = r.x1 - r.x0;
       const d = r.z1 - r.z0;
@@ -123,10 +141,11 @@ export class CityRenderer {
       this.root.add(mesh);
     };
     for (const b of city.blocks) quad(b, KERB_HEIGHT, paving);
-    for (const lot of city.lots) quad(lot, KERB_HEIGHT + 0.01, lot.kind === 'dirt' ? dirt : lot.kind === 'plaza' ? paving : asphalt);
+    const surfaces = { lawn: [lawn, 0.005], path: [path, 0.015], dirt: [dirt, 0.01], plaza: [paving, 0.01], parking: [asphalt, 0.01], yard: [asphalt, 0.01] } as const;
+    for (const lot of city.lots) quad(lot, KERB_HEIGHT + surfaces[lot.kind][1], surfaces[lot.kind][0]);
     const margin = 400;
     const { x0, z0, x1, z1 } = city.bounds;
-    quad({ x0: x0 - margin, z0: z0 - margin, x1: x1 + margin, z1: z1 + margin }, -0.03, { m: dirt.m, tile: 10 });
+    quad({ x0: x0 - margin, z0: z0 - margin, x1: x1 + margin, z1: z1 + margin }, -0.03, { m: lawn.m, tile: 5 });
   }
 
   dispose() {

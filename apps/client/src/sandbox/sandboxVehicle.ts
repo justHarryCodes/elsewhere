@@ -1,3 +1,4 @@
+import type { Collider } from '@dimforge/rapier3d-compat';
 import {
   Color3,
   InstancedMesh,
@@ -27,6 +28,7 @@ import {
   type VehicleInput,
   addCatalogBody,
   addCityColliders,
+  addGroundTiles,
   addStaticBox,
   addVehicle,
   createWalker,
@@ -98,7 +100,7 @@ export class SandboxVehicle {
 
   static async create(scene: Scene, shadows: ShadowGenerator, blocks: StaticBlock[], city?: City): Promise<SandboxVehicle> {
     const sim = await createWorld();
-    addStaticBox(sim, 'ground', { x: 0, y: -0.5, z: 0 }, { x: 500, y: 0.5, z: 500 }, 'asphalt');
+    addGroundTiles(sim, -500, -500, 500, 500);
     if (city) addCityColliders(sim, city);
     blocks.forEach((b, i) =>
       addStaticBox(sim, `block-${i}`, { x: b.x, y: b.height / 2, z: b.z }, { x: b.width / 2, y: b.height / 2, z: b.depth / 2 }),
@@ -145,10 +147,15 @@ export class SandboxVehicle {
   /**
    * How far a ray from `from` along the unit vector `dir` gets before hitting something that doesn't
    * move (buildings, walls, the ground), up to `max` metres; undefined when nothing is in the way.
+   * `bulky`: only things wider than 2 m (buildings), not tree trunks, posts or benches.
    */
-  castStatic(from: Vector3, dir: Vector3, max: number): number | undefined {
+  castStatic(from: Vector3, dir: Vector3, max: number, bulky = false): number | undefined {
     const { RAPIER, world } = this.sim;
-    const hit = world.castRay(new RAPIER.Ray(from, dir), max, true, RAPIER.QueryFilterFlags.ONLY_FIXED);
+    const wide = (c: Collider) => {
+      const half = c.halfExtents();
+      return !half || Math.min(half.x, half.z) > 1;
+    };
+    const hit = world.castRay(new RAPIER.Ray(from, dir), max, true, RAPIER.QueryFilterFlags.ONLY_FIXED, undefined, undefined, undefined, bulky ? wide : undefined);
     return hit?.timeOfImpact;
   }
 

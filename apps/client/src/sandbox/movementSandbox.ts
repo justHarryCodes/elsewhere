@@ -229,8 +229,8 @@ export class MovementSandbox {
         mesh.onDisposeObservable.addOnce(() => this.glow.removeExcludedMesh(mesh));
       },
     });
-    // The city's own look is night: neon, lit windows, purple haze.
-    this.setNight(true);
+    // Day shows the town off; N (or the button) switches to the neon night.
+    this.setNight(false);
 
     SandboxVehicle.create(this.scene, this.shadows, REFERENCES.map(referenceBlock), this.city)
       .then((vehicle) => {
@@ -706,7 +706,7 @@ export class MovementSandbox {
     const dir = camera.position.subtract(camera.target);
     if (!this.vehicle || dir.lengthSquared() < 1e-6) return;
     dir.normalize();
-    const hit = this.vehicle.castStatic(camera.target, dir, this.preferredRadius);
+    const hit = this.vehicle.castStatic(camera.target, dir, this.preferredRadius, true);
     const clear = hit === undefined ? this.preferredRadius : Math.max(camera.lowerRadiusLimit ?? 1, hit - 0.4);
     const radius = clear < camera.radius ? clear : camera.radius + (clear - camera.radius) * (1 - Math.exp(-3 * dt));
     camera.radius = radius;

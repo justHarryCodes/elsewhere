@@ -18,7 +18,7 @@ export function App() {
   useActionHotkeys(sendAction);
   // Everyone builds the same city from the room's seed.
   const city = useMemo(() => (citySeed === undefined ? undefined : generateCity({ seed: citySeed })), [citySeed]);
-  const [night, setNight] = useState(true);
+  const [night, setNight] = useState(false);
   const [view, setView] = useState<CameraView>("chase");
   const [mapOpen, setMapOpen] = useState(false);
   const controls = useRef<SceneControls>(undefined);

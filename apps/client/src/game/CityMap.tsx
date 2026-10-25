@@ -6,7 +6,7 @@ const ZONE_STYLE: Record<CityZone, { label: string; lot: string; building: strin
   commercial: { label: CITY_ZONE_LABELS.commercial.toUpperCase(), lot: '#1a0f2e', building: 'rgba(255,43,214,0.3)', edge: '#ff2bd6' },
   industrial: { label: CITY_ZONE_LABELS.industrial.toUpperCase(), lot: '#1f1a10', building: 'rgba(255,176,46,0.25)', edge: '#ffb02e' },
 };
-const LOT_COLOURS = { parking: '#15121f', yard: '#17150f', plaza: '#241a35', dirt: '#1a140c' } as const;
+const LOT_COLOURS = { lawn: '#0c2416', path: '#2a2638', parking: '#15121f', yard: '#17150f', plaza: '#241a35', dirt: '#1a140c' } as const;
 const ROAD = '#2c2547';
 
 export interface MapPlayer {
