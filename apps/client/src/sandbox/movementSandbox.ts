@@ -43,10 +43,13 @@ import {
   SIDEWALK_WIDTH,
   STREET_WIDTH,
   nearestSpot,
+  type CityInterior,
+  interiorDoorAt,
 } from '@game/shared';
 import { Atmosphere } from '../game/babylon/atmosphere';
 import type { CameraView } from '../game/CameraControls';
 import { CityRenderer } from '../game/babylon/city';
+import { TownLife } from '../game/babylon/townLife';
 import { type HumanCharacter, HumanLibrary } from '../game/babylon/humans';
 import { measureNode } from '../game/babylon/realScale';
 import { SandboxVehicle, type VehicleStats } from './sandboxVehicle';
@@ -76,6 +79,10 @@ export interface SandboxStats {
   boarding: boolean;
   /** Close enough to the car to get in with E. */
   nearVehicle: boolean;
+  /** At a door you can use with E: going in (outside) or out (inside), and where. */
+  door?: { name: string; inside: boolean };
+  /** The room the character is in, if any. */
+  room?: string;
   night: boolean;
   view: CameraView;
 }
@@ -104,6 +111,8 @@ const SANDBOX_VIEWS: Record<CameraView, { radius: number; beta: number }> = {
 const SHADOW_RANGE = 90; // metres of shadow round the camera
 const CAMERA_TARGET_HEIGHT = 1.1;
 const DRIVING_CAMERA_RADIUS = 9;
+// Inside, a doll's-house view: from above and behind, over the (roofless) room's walls.
+const ROOM_CAMERA = { radius: 9, beta: 0.65, maxBeta: 1.05 };
 const ENTER_DISTANCE = 1.5; // metres from the car's outline to get in
 const EXIT_MAX_SPEED = 0.3; // m/s; the car has to be stopped to get out
 // Where the pelvis sits relative to the character's origin in the driving clip (measured).
@@ -174,10 +183,14 @@ export class MovementSandbox {
   private groundMaterial?: StandardMaterial;
   private readonly city: City;
   private readonly cityRenderer: CityRenderer;
+  /** Cars on the streets and people on the sidewalks round the camera. */
+  private readonly life: TownLife;
   private vehicle?: SandboxVehicle;
   private vehicleError?: string;
   private driving = false;
   private boarding?: Boarding;
+  /** The room the character is in, and the camera to go back to when they leave it. */
+  private room?: { interior: CityInterior; radius: number; beta: number };
   private night = false;
 
   constructor(canvas: HTMLCanvasElement) {
@@ -229,6 +242,7 @@ export class MovementSandbox {
         mesh.onDisposeObservable.addOnce(() => this.glow.removeExcludedMesh(mesh));
       },
     });
+    this.life = new TownLife(this.scene, this.city);
     // Day shows the town off; N (or the button) switches to the neon night.
     this.setNight(false);
 
@@ -363,6 +377,7 @@ export class MovementSandbox {
    * street); driving, or inside a building, the nearest street.
    */
   goTo(x: number, z: number) {
+    this.leaveRoom();
     if (this.driving || this.boarding || !this.character || !isOpenGround(this.city, x, z)) {
       this.navigateTo(x, z);
       return;
@@ -378,6 +393,7 @@ export class MovementSandbox {
   /** The car to `car` (driver and all, if driving); on foot, the character beside it to its right. */
   private travel(car: { x: number; z: number; heading: number }, side: number, groundY: number) {
     if (!this.character) return;
+    this.leaveRoom();
     if (this.driving || this.boarding) {
       void this.rebuildVehicle((vehicle) => vehicle.respawn(car));
       return;
@@ -553,13 +569,19 @@ export class MovementSandbox {
     this.night = night;
     this.atmosphere.set(night);
     this.cityRenderer.setNight(night);
+    this.life.setNight(night);
     this.groundMaterial?.diffuseColor.copyFrom(night ? GROUND_NIGHT : GROUND_DAY);
     // Nobody drives at night with the lights off.
     if (night && this.vehicle?.getStats(this.driving).headlights === 'off') this.vehicle.setHeadlights('low');
   }
 
-  /** Walks to the door and gets in when close to the car; gets out when driving slowly enough. */
+  /** E: through a door when at one; else gets in the car when close, or out when slow enough. */
   toggleVehicle() {
+    const door = this.doorHere();
+    if (door && !this.isNearVehicle()) {
+      this.useDoor(door.interior, door.inside);
+      return;
+    }
     if (this.boarding || !this.vehicle || !this.character) return;
     if (this.driving) {
       if (Math.abs(this.vehicle.getStats(true).speedKmh) / 3.6 <= EXIT_MAX_SPEED) this.exitVehicle();
@@ -568,8 +590,66 @@ export class MovementSandbox {
     }
   }
 
+  /** The door the character is standing at (on foot), if any. */
+  private doorHere() {
+    const root = this.character?.root;
+    if (!root || this.driving || this.boarding) return undefined;
+    return interiorDoorAt(this.city.interiors, root.position.x, root.position.y, root.position.z);
+  }
+
+  /**
+   * In through a building's front door (into its room, under the town, with a doll's-house view) or
+   * back out onto the street in front of it.
+   */
+  useDoor(interior: CityInterior, inside: boolean) {
+    const root = this.character?.root;
+    if (!root) return;
+    const camera = this.camera;
+    if (inside) {
+      root.position.set(interior.door.x, KERB_HEIGHT + 0.05, interior.door.z);
+      root.rotation.set(0, interior.door.heading, 0);
+      camera.upperBetaLimit = Math.PI / 2 - 0.05;
+      if (this.room) this.cameraGoal = { radius: this.room.radius, beta: this.room.beta };
+      this.room = undefined;
+    } else {
+      root.position.set(interior.entry.x, interior.entry.y + 0.05, interior.entry.z);
+      root.rotation.set(0, interior.entry.heading, 0);
+      this.room = { interior, radius: this.preferredRadius, beta: camera.beta };
+      camera.upperBetaLimit = ROOM_CAMERA.maxBeta;
+      // Behind the character as they come in, looking down into the room.
+      const heading = interior.entry.heading;
+      this.cameraGoal = { radius: ROOM_CAMERA.radius, beta: ROOM_CAMERA.beta, alpha: Math.atan2(-Math.cos(heading), -Math.sin(heading)) };
+    }
+    this.vehicle?.placeWalker(root.position);
+    this.velocityY = 0;
+    camera.target.copyFrom(root.position.add(new Vector3(0, CAMERA_TARGET_HEIGHT, 0)));
+  }
+
+  /** Back to the street camera when jumping somewhere else from inside a room. */
+  private leaveRoom() {
+    if (!this.room) return;
+    this.camera.upperBetaLimit = Math.PI / 2 - 0.05;
+    this.cameraGoal = { radius: this.room.radius, beta: this.room.beta };
+    this.room = undefined;
+  }
+
+  /** To the front door of the player's home. */
+  goHome() {
+    const home = this.city.interiors[this.city.home];
+    if (!home || this.driving || this.boarding || !this.character) return;
+    this.leaveRoom();
+    const root = this.character.root;
+    root.position.set(home.door.x, KERB_HEIGHT + 0.05, home.door.z);
+    root.rotation.set(0, home.door.heading + Math.PI, 0);
+    this.vehicle?.placeWalker(root.position);
+    this.velocityY = 0;
+    this.camera.target.copyFrom(root.position.add(new Vector3(0, CAMERA_TARGET_HEIGHT, 0)));
+    if (this.vehicle) void this.vehicle.respawn(laneAt(nearestSpot(this.city, home.door.x, home.door.z)));
+  }
+
   getStats(): SandboxStats {
     const root = this.character?.root;
+    const door = this.doorHere();
     return {
       loading: !this.character && !this.error,
       error: this.error,
@@ -588,6 +668,8 @@ export class MovementSandbox {
       driving: this.driving,
       boarding: !!this.boarding,
       nearVehicle: !this.driving && !this.boarding && this.isNearVehicle(),
+      door: door && !this.isNearVehicle() ? { name: door.interior.name, inside: door.inside } : undefined,
+      room: this.room?.interior.name,
       night: this.night,
       view: this.view,
     };
@@ -600,6 +682,7 @@ export class MovementSandbox {
     window.removeEventListener('blur', this.onBlur);
     window.removeEventListener('resize', this.onResize);
     this.vehicle?.dispose();
+    this.life.dispose();
     this.cityRenderer.dispose();
     this.engine.dispose();
   }
@@ -625,6 +708,13 @@ export class MovementSandbox {
   private update(dt: number) {
     this.atmosphere.follow(this.camera.target);
     this.cityRenderer.update(this.camera.target, dt);
+    // Traffic stops for the character and the car, and is solid to both (kinematic boxes).
+    const obstacles: { x: number; z: number }[] = [];
+    if (this.character && !this.driving && !this.room) obstacles.push(this.character.root.position);
+    const at = this.vehicle?.position;
+    if (at) obstacles.push(at);
+    this.life.update(dt, this.camera.target, obstacles);
+    this.vehicle?.syncTraffic(this.life.traffic.cars);
     // Keep the shadow-casting sun over the camera.
     this.sun.position.copyFrom(this.camera.target.subtract(this.sun.direction.normalizeToNew().scale(150)));
     const vehicle = this.vehicle;
@@ -670,9 +760,10 @@ export class MovementSandbox {
       position: root.position.add(step),
       grounded: root.position.y + step.y <= 0,
     };
-    root.position.set(result.position.x, Math.max(0, result.position.y), result.position.z);
+    // Without physics (still loading) the ground is y = 0; with it, the colliders decide (rooms are below 0).
+    root.position.set(result.position.x, this.vehicle ? result.position.y : Math.max(0, result.position.y), result.position.z);
     const wasGrounded = this.grounded;
-    this.grounded = result.grounded || root.position.y <= 0;
+    this.grounded = result.grounded || (!this.vehicle && root.position.y <= 0);
     if (this.grounded && this.velocityY < 0) this.velocityY = 0;
     if (this.grounded && !wasGrounded) {
       if (!moving) character.play('jumpLand', { then: 'idle' });
@@ -704,6 +795,12 @@ export class MovementSandbox {
     this.easeCamera(dt);
     if (Math.abs(camera.radius - this.appliedRadius) > 1e-3) this.preferredRadius = camera.radius; // zoomed
     const dir = camera.position.subtract(camera.target);
+    // Inside, the camera looks down over the walls: nothing to keep clear of.
+    if (this.room) {
+      camera.radius = this.preferredRadius;
+      this.appliedRadius = camera.radius;
+      return;
+    }
     if (!this.vehicle || dir.lengthSquared() < 1e-6) return;
     dir.normalize();
     const hit = this.vehicle.castStatic(camera.target, dir, this.preferredRadius, true);

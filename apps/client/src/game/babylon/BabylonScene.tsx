@@ -21,6 +21,7 @@ import {
 import type { CameraView } from "../CameraControls";
 import { Atmosphere } from "./atmosphere";
 import { CityRenderer } from "./city";
+import { TownLife } from "./townLife";
 import { type HumanCharacter, HumanLibrary } from "./humans";
 
 const CAMERA_ALPHA = Math.PI / 2; // horizontal angle (PI/2 = behind the player, looking toward -Z)
@@ -30,6 +31,9 @@ const VIEWS: Record<CameraView, { radius: number; beta: number }> = {
   chase: { radius: CAMERA_DISTANCE, beta: CAMERA_POLAR },
   overhead: { radius: 110, beta: 0.15 },
 };
+
+// Inside a room: from above and behind, over its (roofless) walls.
+const ROOM_VIEW = { radius: 9, beta: 0.65, maxBeta: 1.05 };
 
 /** Camera moves the page can ask for (buttons), beyond the view and night props. */
 export interface SceneControls {
@@ -56,8 +60,11 @@ export function BabylonScene({
   controlsRef?: MutableRefObject<SceneControls | undefined>;
 }) {
   const canvasRef = useRef<HTMLCanvasElement>(null);
+  // The view prop as it is now, for the scene's loop (it doesn't rebuild when the view changes).
+  const currentView = useRef(view);
+  currentView.current = view;
   // Live handles into the running scene, for the night and view props below.
-  const sceneRef = useRef<{ atmosphere: Atmosphere; cityRenderer: CityRenderer; goal: (goal: CameraGoal) => void }>(undefined);
+  const sceneRef = useRef<{ atmosphere: Atmosphere; cityRenderer: CityRenderer; life: TownLife; goal: (goal: CameraGoal) => void }>(undefined);
 
   useEffect(() => {
     const canvas = canvasRef.current!;
@@ -88,6 +95,9 @@ export function BabylonScene({
     // The same city the server collides against (from the room's seed), built in chunks round the
     // camera as the player moves.
     const cityRenderer = CityRenderer.create(scene, city);
+    // Traffic and people on the sidewalks: each client draws its own round its player (they stop for
+    // players rather than hit them, since they aren't on the server).
+    const life = new TownLife(scene, city);
 
     let goal: CameraGoal | undefined;
     const easeCamera = (dt: number) => {
@@ -102,7 +112,7 @@ export function BabylonScene({
       }
       if (done) goal = undefined;
     };
-    sceneRef.current = { atmosphere, cityRenderer, goal: (next) => (goal = { ...goal, ...next }) };
+    sceneRef.current = { atmosphere, cityRenderer, life, goal: (next) => (goal = { ...goal, ...next }) };
     if (controlsRef) {
       controlsRef.current = {
         rotate: (radians) => (goal = { ...goal, alpha: (goal?.alpha ?? camera.alpha) + radians }),
@@ -126,9 +136,11 @@ export function BabylonScene({
       string,
       { character: HumanCharacter; animation?: string; seq: number }
     >();
+    let wasInRoom = false;
     scene.onBeforeRenderObservable.add(() => {
       const dt = engine.getDeltaTime() / 1000;
       cityRenderer.update(camera.target, dt);
+      life.update(dt, camera.target, [...players.current.values()]);
       atmosphere.follow(camera.target);
       easeCamera(dt);
       if (!library) return;
@@ -154,6 +166,13 @@ export function BabylonScene({
 
         // Move the orbit target onto the player; alpha/beta/radius (and mouse orbit/zoom) are kept.
         if (id === followId) {
+          // In a room (under the town): look down into it over the walls, doll's-house style.
+          const inRoom = player.y < -5;
+          if (inRoom !== wasInRoom) {
+            wasInRoom = inRoom;
+            camera.upperBetaLimit = inRoom ? ROOM_VIEW.maxBeta : Math.PI / 2 - 0.05;
+            goal = inRoom ? { radius: ROOM_VIEW.radius, beta: ROOM_VIEW.beta } : { ...VIEWS[currentView.current] };
+          }
           camera.target.set(
             root.position.x,
             root.position.y + CAMERA_TARGET_HEIGHT,
@@ -189,6 +208,7 @@ export function BabylonScene({
       disposed = true;
       sceneRef.current = undefined;
       if (controlsRef) controlsRef.current = undefined;
+      life.dispose();
       cityRenderer.dispose();
       window.removeEventListener("resize", onResize);
       engine.dispose();
@@ -202,6 +222,7 @@ export function BabylonScene({
     if (!live) return;
     live.atmosphere.set(night);
     live.cityRenderer.setNight(night);
+    live.life.setNight(night);
   }, [night, players, selfId, city]);
 
   useEffect(() => {

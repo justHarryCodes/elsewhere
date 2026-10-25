@@ -10,6 +10,7 @@ import {
   type Scene,
   Vector3,
 } from '@babylonjs/core';
+import { SKY_HORIZON, SkyDome } from './sky';
 
 /** Sky, fog, light and grading for one time of day. */
 interface Look {
@@ -29,9 +30,9 @@ interface Look {
   aberration: number;
 }
 
-// Day: a hazy, slightly cool city sky; the neon is there but the sun wins.
+// Day: blue sky with clouds (the sky dome), a pale haze toward the horizon.
 const DAY: Look = {
-  sky: new Color4(0.55, 0.66, 0.82, 1),
+  sky: new Color4(SKY_HORIZON.day.r, SKY_HORIZON.day.g, SKY_HORIZON.day.b, 1),
   fogDensity: 0.0018,
   hemi: 0.7,
   hemiSky: new Color3(1, 1, 1),
@@ -47,23 +48,24 @@ const DAY: Look = {
   aberration: 0,
 };
 
-// Night: cyberpunk. A violet-black sky and purple haze, a faint blue moon, and enough violet ambient
-// light to read the streets; windows, neon and lamps do the rest, with bloom round everything bright.
+// Night: a big city after dark. A deep blue starry sky warmed by the city's glow at the horizon, a
+// bright moon and plenty of cool ambient light, so streets and buildings read clearly; lit windows,
+// street lamps, shop neon and car lights do the rest, with bloom round everything bright.
 const NIGHT: Look = {
-  sky: new Color4(0.035, 0.015, 0.075, 1),
-  fogDensity: 0.0045,
-  hemi: 0.45,
-  hemiSky: new Color3(0.45, 0.38, 0.95),
-  hemiGround: new Color3(0.3, 0.06, 0.3),
-  sun: 0.18,
-  sunColor: new Color3(0.55, 0.65, 1),
-  env: 0.12,
-  bloomWeight: 0.7,
-  bloomThreshold: 0.5,
-  exposure: 1.1,
-  contrast: 1.3,
-  vignette: 3,
-  aberration: 7,
+  sky: new Color4(SKY_HORIZON.night.r, SKY_HORIZON.night.g, SKY_HORIZON.night.b, 1),
+  fogDensity: 0.0024,
+  hemi: 0.85,
+  hemiSky: new Color3(0.5, 0.58, 0.9),
+  hemiGround: new Color3(0.32, 0.26, 0.24),
+  sun: 0.45,
+  sunColor: new Color3(0.62, 0.72, 1),
+  env: 0.3,
+  bloomWeight: 0.4,
+  bloomThreshold: 0.7,
+  exposure: 1.3,
+  contrast: 1.12,
+  vignette: 1.6,
+  aberration: 0,
 };
 
 /**
@@ -75,6 +77,7 @@ export class Atmosphere {
   night = false;
   /** A soft light that hangs over the player at night, so they never become a silhouette. */
   private readonly playerLight: PointLight;
+  private readonly sky: SkyDome;
 
   constructor(
     private readonly scene: Scene,
@@ -95,13 +98,14 @@ export class Atmosphere {
     image.toneMappingType = ImageProcessingConfiguration.TONEMAPPING_ACES;
     image.vignetteEnabled = true;
     image.vignetteBlendMode = ImageProcessingConfiguration.VIGNETTEMODE_MULTIPLY;
-    image.vignetteColor = new Color4(0.08, 0, 0.12, 0);
+    image.vignetteColor = new Color4(0.02, 0.02, 0.06, 0);
     this.pipeline.chromaticAberrationEnabled = true;
     this.playerLight = new PointLight('player-light', new Vector3(0, 3, 0), scene);
-    this.playerLight.diffuse = new Color3(1, 0.75, 0.95);
+    this.playerLight.diffuse = new Color3(1, 0.9, 0.8);
     this.playerLight.specular = new Color3(0.3, 0.2, 0.3);
     this.playerLight.intensity = 6;
     this.playerLight.range = 9;
+    this.sky = new SkyDome(scene);
     this.set(false);
   }
 
@@ -122,6 +126,7 @@ export class Atmosphere {
     this.hemi.groundColor = look.hemiGround.clone();
     this.sun.intensity = look.sun;
     this.playerLight.setEnabled(night);
+    this.sky.set(night);
     this.sun.diffuse = look.sunColor.clone();
     scene.environmentIntensity = look.env;
     const p = this.pipeline;

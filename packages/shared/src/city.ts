@@ -11,6 +11,8 @@
 //
 // Heights: the road surface is y = 0; sidewalks and lots are a kerb (15 cm) above it.
 
+import { type CityInterior, type InteriorKind, buildInterior } from './interiors';
+
 /** Sidewalks and lots stand this far above the road (the kit's kerb). */
 export const KERB_HEIGHT = 0.15;
 /** A 4-lane street with its sidewalks, metres: 4 lanes of 3 m plus a 3 m sidewalk each side. */
@@ -129,6 +131,39 @@ const CYAN = 1;
 const AMBER = 6;
 const WARM = 7;
 
+/** A name board in front of a service building (police, hospital, school...): drawn as text. */
+export interface CitySign {
+  text: string;
+  /** Centre of the board, metres. */
+  x: number;
+  y: number;
+  z: number;
+  /** Turns the board's face (+Z) toward the street, like a building's front. */
+  yaw: number;
+  w: number;
+  h: number;
+  /** Board and lettering colours (CSS). */
+  background: string;
+  color: string;
+}
+
+/** The town's public buildings, each on its own block. */
+export type CityService = 'police' | 'fire' | 'hospital' | 'school' | 'townHall' | 'bank' | 'post' | 'library';
+
+/** A junction of the street grid, for anything that drives along the streets. */
+export interface CityNode {
+  x: number;
+  z: number;
+  /** Traffic lights (downtown junctions of three or four streets). */
+  signal: boolean;
+}
+
+/** The streets as a graph: junctions joined by straight streets (indexes into nodes). */
+export interface CityGraph {
+  nodes: CityNode[];
+  edges: [number, number][];
+}
+
 /** A block of ground between streets, metres (world X/Z). */
 export interface CityBlock {
   zone: CityZone;
@@ -136,6 +171,8 @@ export interface CityBlock {
   z0: number;
   x1: number;
   z1: number;
+  /** A public building's block. */
+  service?: CityService;
 }
 
 /** A place on a street to put a car or a player: on its centre line, heading along it. */
@@ -167,6 +204,12 @@ export interface City {
   spots: CitySpot[];
   neon: CityNeon[];
   lights: CityLight[];
+  signs: CitySign[];
+  graph: CityGraph;
+  /** Rooms you can go into (under their buildings): walk up to the front door. */
+  interiors: CityInterior[];
+  /** Which of them is the player's own home (an index into interiors), or -1. */
+  home: number;
 }
 
 export interface CityOptions {
@@ -203,7 +246,7 @@ const pick = <T>(rng: Rng, items: readonly T[]): T => items[Math.floor(rng() * i
 
 /** Whether the room behind a window is lit at night, and which room picture it shows. */
 export function roomLook(room: number): { lit: boolean; picture: 0 | 1 } {
-  return { lit: room % 100 < 62, picture: room % 2 === 0 ? 0 : 1 };
+  return { lit: room % 100 < 80, picture: room % 2 === 0 ? 0 : 1 };
 }
 
 // ------------------------------------------------------------------ directions
@@ -359,11 +402,61 @@ const TOWN_SETS: Record<'residential' | 'commercial', TownBuilding[]> = {
     '4Story_Wide_2Doors', '4Story_Wide_2Doors_Roof', '6Story_Stack', '6Story_Stack',
   ],
 };
+/** Houses that make a good home for the player (look lived in, not a shop). */
+const HOME_MODELS: TownBuilding[] = ['1Story_GableRoof', '2Story_GableRoof', '2Story_Sidehouse', '2Story_Balcony', '2Story_Columns', '2Story', '2Story_2'];
 /** How many buildings a town cluster has, by district (repeated for weight). */
 const CLUSTER_SIZES: Record<'residential' | 'commercial', number[]> = {
-  residential: [3, 3, 4, 4, 4, 5, 5, 6, 8],
-  commercial: [4, 5, 5, 6, 6, 8, 10, 10],
+  residential: [4, 5, 5, 6, 7, 8, 8, 10, 12],
+  commercial: [5, 6, 7, 8, 9, 10, 10, 12, 14],
 };
+
+// Other buildings (scripts/city/pack_town.py): x0, x1, z0, z1 (front toward +Z) and roof height, metres.
+const SERVICE_BUILDINGS = {
+  hospital: [-19.017, 7.568, -6.568, 7.657, 14],
+} as const;
+
+// Parked cars (pack_town.py, facing +Z): width, length and height, metres.
+const CARS = {
+  'police-car': [1.95, 4.1, 1.36],
+  ambulance: [2.2, 4.8, 2.38],
+  taxi: [1.85, 4.3, 1.34],
+  suv: [1.95, 3.9, 1.41],
+  hatchback: [1.8, 3.6, 1.26],
+  sedan: [1.85, 4.3, 1.2],
+  van: [2.0, 3.65, 1.56],
+} as const;
+type Car = keyof typeof CARS;
+const CIVILIAN_CARS: Car[] = ['suv', 'hatchback', 'hatchback', 'sedan', 'sedan', 'taxi', 'van'];
+
+/**
+ * The public buildings: which district, which building in which colour scheme (an index into the
+ * pack's palettes: Blue, Dark, DarkBlue, DarkPurple, Green, Grey, Light, Light2, Red, Yellow), the name
+ * board out front, and what's beside it: a car park (with these cars), a playground or a little square.
+ */
+interface ServiceSpec {
+  zone: 'residential' | 'commercial';
+  name: string;
+  model: TownBuilding | keyof typeof SERVICE_BUILDINGS;
+  skin?: number;
+  background: string;
+  color: string;
+  yard: 'parking' | 'playground' | 'plaza';
+  cars?: Car[];
+  /** Share of the car park's bays taken. */
+  fill?: number;
+}
+const SERVICES: Record<CityService, ServiceSpec> = {
+  townHall: { zone: 'commercial', name: 'TOWN HALL', model: '4Story_Wide_2Doors_Roof', skin: 6, background: '#2f3340', color: '#f3d36b', yard: 'plaza' },
+  police: { zone: 'commercial', name: 'POLICE', model: '4Story_Wide_2Doors', skin: 2, background: '#16306e', color: '#ffffff', yard: 'parking', cars: ['police-car'], fill: 0.55 },
+  hospital: { zone: 'commercial', name: 'HOSPITAL', model: 'hospital', background: '#ffffff', color: '#c8161d', yard: 'parking', cars: ['ambulance', 'ambulance', ...CIVILIAN_CARS], fill: 0.5 },
+  bank: { zone: 'commercial', name: 'BANK', model: '2Story_Columns', skin: 5, background: '#1d4d34', color: '#f4e7b0', yard: 'parking', cars: CIVILIAN_CARS, fill: 0.45 },
+  fire: { zone: 'residential', name: 'FIRE STATION', model: '2Story_Wide_2Doors', skin: 8, background: '#b01b17', color: '#ffffff', yard: 'plaza' },
+  school: { zone: 'residential', name: 'SCHOOL', model: '2Story_Wide_2Doors', skin: 9, background: '#f2b705', color: '#1d1d1d', yard: 'playground' },
+  post: { zone: 'residential', name: 'POST OFFICE', model: '2Story_Wide', skin: 0, background: '#d42a2a', color: '#ffe14d', yard: 'parking', cars: ['van'], fill: 0.5 },
+  library: { zone: 'residential', name: 'LIBRARY', model: '2Story_Columns', skin: 7, background: '#5a3a22', color: '#f1e3c6', yard: 'parking', cars: CIVILIAN_CARS, fill: 0.35 },
+};
+/** In the order they pick their blocks (the town hall first: it takes the one nearest the middle). */
+const SERVICE_ORDER: CityService[] = ['townHall', 'police', 'hospital', 'bank', 'fire', 'school', 'post', 'library'];
 
 // Street props: footprint (x, z) and height in metres, and which way their front faces as authored.
 const PROPS = {
@@ -383,6 +476,10 @@ const PROPS = {
   'billboard-2': { w: 4.93, d: 6.92, h: 7.5, front: '-X' },
   dumpster: { w: 1.68, d: 0.89, h: 1.4, front: 'Z' },
   atm: { w: 0.73, d: 0.75, h: 1.8, front: 'Z' },
+  bicycle: { w: 1.8, d: 0.62, h: 1.05, front: 'Z' },
+  'trah-bag-grey': { w: 0.32, d: 0.34, h: 0.55, front: 'Z' },
+  'washing-line': { w: 1.31, d: 1.66, h: 2.1, front: 'Z' },
+  cone: { w: 0.46, d: 0.46, h: 0.7, front: 'Z' },
 } as const;
 type Prop = keyof typeof PROPS;
 /** Yaw that turns a prop's authored front toward a side. */
@@ -436,6 +533,12 @@ export function generateCity(options: CityOptions = {}): City {
   const spots: CitySpot[] = [];
   const neon: CityNeon[] = [];
   const lights: CityLight[] = [];
+  const signs: CitySign[] = [];
+  const graph: CityGraph = { nodes: [], edges: [] };
+  const interiors: CityInterior[] = [];
+  let home = -1;
+  /** Which buildings are the public ones. */
+  const serviceOf = new Map<CityBuilding, CityService>();
 
   /** A street prop turned to face `side`, with a collider (unless it's something you'd step over). */
   const addProp = (prop: Prop, x: number, z: number, side: Side, solid = true) => {
@@ -543,6 +646,7 @@ export function generateCity(options: CityOptions = {}): City {
       // Junction corners: traffic lights downtown, stop signs elsewhere (never at the works).
       const zone = zoneAtX(x);
       const arms = [N, E, S, W].filter((bit) => mask & bit).length;
+      graph.nodes[i * nz + j] = { x, z, signal: zone === 'commercial' && arms >= 3 };
       if (zone !== 'industrial' && arms >= 3) {
         const corner = JUNCTION_HALF - 5;
         for (const [sx, sz] of [[1, 1], [-1, 1], [-1, -1], [1, -1]] as const) {
@@ -573,6 +677,12 @@ export function generateCity(options: CityOptions = {}): City {
         ? { x0: ax + ra, x1: bx - rb, z0: az - HALF_STREET, z1: az + HALF_STREET }
         : { x0: ax - HALF_STREET, x1: ax + HALF_STREET, z0: az + ra, z1: bz - rb },
     );
+    // Manhole covers in the lanes.
+    for (let m = intBetween(rng, 0, 2); m > 0; m--) {
+      const t = (alongX ? ax : az) + ra + between(rng, 0.15, 0.85) * length;
+      const lane = (rng() < 0.5 ? -1 : 1) * LANE_WIDTH * (rng() < 0.5 ? 0.5 : 1.5);
+      props.push({ piece: 'prop/manhole-cover', x: alongX ? t : ax + lane, y: 0.004, z: alongX ? az + lane : t, yaw: rng() * Math.PI, scale: 0.4 });
+    }
     // Lamps every ~32 m, alternating sides, by the kerb with the arm out over the road.
     const lamps = Math.max(1, Math.round(length / 32));
     for (let l = 0; l < lamps; l++) {
@@ -589,15 +699,18 @@ export function generateCity(options: CityOptions = {}): City {
     const to = (alongX ? bx : bz) - rb;
     const at = (t: number, off: number): [number, number] => (alongX ? [t, az + off] : [ax + off, t]);
     const lampAt = (t: number) => Array.from({ length: lamps }, (_, l) => from + ((l + 0.5) * length) / lamps).some((lt) => Math.abs(lt - t) < 4);
-    // Street trees along the kerb side of both sidewalks, between the lamps.
-    const trees = Math.max(1, Math.round(length / 20));
+    // Street trees in an even row along the kerb side of both sidewalks (one kind per street, all the
+    // same size), opposite each other, leaving room for the lamps.
+    const trees = Math.max(1, Math.round(length / 17));
+    const treeKind = pick(rng, zone === 'commercial' ? ['tree-4', 'tree-5'] : ['tree', 'tree-4', 'tree-4']);
+    const treeAt: number[] = [];
     for (let k = 0; k < trees; k++) {
       const t = from + ((k + 0.5) * length) / trees;
       if (lampAt(t)) continue;
+      treeAt.push(t);
       for (const side of [1, -1]) {
-        if (rng() < 0.4) continue;
         const [x, z] = at(t, side * (HALF_STREET - SIDEWALK_WIDTH + 1));
-        addTree(pick(rng, zone === 'commercial' ? ['tree-4', 'tree-5'] : TREES), x, z, 0.6, 0.8);
+        addTree(treeKind, x, z, 0.7, 0.72);
       }
     }
     // Furniture along the building side of the sidewalks, facing the road: benches with a bin,
@@ -608,7 +721,7 @@ export function generateCity(options: CityOptions = {}): City {
       let busStop = length > 40 && rng() < 0.35;
       for (let t = from + between(rng, 5, 12); t < to - 4; t += between(rng, 9, 20)) {
         const r = rng();
-        if (busStop && t > from + length / 3) {
+        if (busStop && t > from + length / 3 && !treeAt.some((tt) => Math.abs(tt - t) < 3.5 || Math.abs(tt - t - 3.2) < 1.2)) {
           const [x, z] = at(t, side * (HALF_STREET - 1.4));
           addProp('bus-stop', x, z, face);
           const [sx, sz] = at(t + 3.2, side * (HALF_STREET - SIDEWALK_WIDTH + 0.4));
@@ -642,13 +755,19 @@ export function generateCity(options: CityOptions = {}): City {
     shapes.push({ kind: 'cylinder', x, y: KERB_HEIGHT, z, w: 0.18, h: pole, d: 0.18, yaw: 0, color: '#23232b' });
     shapes.push({ kind: 'box', x: x + (dx * arm) / 2, y: KERB_HEIGHT + pole - 0.1, z: z + (dz * arm) / 2, w: dx !== 0 ? arm : 0.12, h: 0.12, d: dz !== 0 ? arm : 0.12, yaw: 0, color: '#23232b' });
     colliders.push({ x, y: KERB_HEIGHT + pole / 2, z, hx: 0.12, hy: pole / 2, hz: 0.12 });
-    const colour = zone === 'commercial' ? (n % 3 === 0 ? PINK : CYAN) : zone === 'industrial' && n % 4 === 0 ? CYAN : AMBER;
+    const colour = zone === 'commercial' ? (n % 4 === 0 ? CYAN : WARM) : zone === 'industrial' && n % 4 === 0 ? CYAN : n % 2 === 0 ? WARM : AMBER;
     lights.push({ x: x + dx * arm, y: KERB_HEIGHT + pole - 0.25, z: z + dz * arm, color: colour });
   };
   for (let i = 0; i < nx; i++) {
     for (let j = 0; j < nz; j++) {
-      if (i < nx - 1 && eastWest[i][j]) addStreet(xs[i], zs[j], xs[i + 1], zs[j], reach.get(cellKey(i, j))!, reach.get(cellKey(i + 1, j))!);
-      if (j < nz - 1 && northSouth[i][j]) addStreet(xs[i], zs[j], xs[i], zs[j + 1], reach.get(cellKey(i, j))!, reach.get(cellKey(i, j + 1))!);
+      if (i < nx - 1 && eastWest[i][j]) {
+        addStreet(xs[i], zs[j], xs[i + 1], zs[j], reach.get(cellKey(i, j))!, reach.get(cellKey(i + 1, j))!);
+        graph.edges.push([i * nz + j, (i + 1) * nz + j]);
+      }
+      if (j < nz - 1 && northSouth[i][j]) {
+        addStreet(xs[i], zs[j], xs[i], zs[j + 1], reach.get(cellKey(i, j))!, reach.get(cellKey(i, j + 1))!);
+        graph.edges.push([i * nz + j, i * nz + j + 1]);
+      }
     }
   }
 
@@ -690,28 +809,89 @@ export function generateCity(options: CityOptions = {}): City {
     colliders.push({ x: cx + s * (halfX - SIDEWALK_WIDTH / 2), y: KERB_HEIGHT / 2, z: cz, hx: SIDEWALK_WIDTH / 2, hy: KERB_HEIGHT / 2, hz: halfZ });
   }
 
+  const expand = (r: Rect, by: number): Rect => ({ x0: r.x0 - by, x1: r.x1 + by, z0: r.z0 - by, z1: r.z1 + by });
+  const footprintOf = (model: string): readonly number[] =>
+    (TOWN_BUILDINGS as Record<string, readonly number[]>)[model] ?? (SERVICE_BUILDINGS as Record<string, readonly number[]>)[model];
+  const opposite = (side: Side): Side => ({ N: 'S', S: 'N', E: 'W', W: 'E' } as const)[side];
+
+  // ---- public buildings: each takes a town block of its district, picked before the rest are filled
+  const downtownX = (xs[DISTRICT_COLUMNS.commercial[0]] + xs[DISTRICT_COLUMNS.commercial[1]]) / 2;
+  for (const service of SERVICE_ORDER) {
+    const zone = SERVICES[service].zone;
+    const choices = blocks.filter((b) => b.zone === zone && !b.service && b.x1 - b.x0 >= 44 && b.z1 - b.z0 >= 42);
+    if (!choices.length) continue;
+    const away = (b: CityBlock) => Math.hypot((b.x0 + b.x1) / 2 - downtownX, (b.z0 + b.z1) / 2 - cz);
+    const block = service === 'townHall' ? choices.reduce((a, b) => (away(a) <= away(b) ? a : b)) : pick(rng, choices);
+    block.service = service;
+  }
+
   // ---- buildings, then plazas, parking and yards in what's left of each block
   for (const block of blocks) {
     if (block.zone === 'industrial') fillBlock(block);
     else fillTownBlock(block, block.zone);
   }
 
-  // ---- town blocks: a cluster of buildings in the middle (or a park, or a square), all on a lawn
+  // ---- rooms inside: the player's home, the public buildings, some houses, shops, cafés and offices
+  {
+    // Their own random sequence, so adding rooms never moves a building.
+    const roomRng = seededRandom(seed ^ 0x51ed27);
+    const model = (b: CityBuilding) => b.pieces[0].piece.replace(/^\w+\//, '');
+    // Home: a detached-looking house in the middle of Old Town.
+    const target = { x: (bounds.x0 + xs[DISTRICT_COLUMNS.residential[1]]) / 2, z: cz };
+    let homeBuilding = -1;
+    let best = Infinity;
+    buildings.forEach((b, i) => {
+      if (b.zone !== 'residential' || b.style !== 'town' || serviceOf.has(b) || !HOME_MODELS.includes(model(b) as TownBuilding)) return;
+      const distance = Math.hypot((b.x0 + b.x1) / 2 - target.x, (b.z0 + b.z1) / 2 - target.z);
+      if (distance < best) {
+        best = distance;
+        homeBuilding = i;
+      }
+    });
+    buildings.forEach((b, i) => {
+      if (b.style !== 'town') return;
+      let kind: InteriorKind | undefined = i === homeBuilding ? 'home' : serviceOf.get(b);
+      const r = roomRng();
+      const shopFront = model(b).includes('Sign');
+      if (!kind && b.zone === 'residential' && r < 0.22) kind = shopFront ? 'shop' : 'house';
+      if (!kind && b.zone === 'commercial' && r < 0.32) kind = b.height > 11 ? 'office' : shopFront ? pick(roomRng, ['shop', 'cafe'] as const) : pick(roomRng, ['shop', 'cafe', 'office'] as const);
+      if (!kind) return;
+      const [ox, oz] = OUT[b.face];
+      const front = b.face === 'N' ? b.z1 : b.face === 'S' ? b.z0 : b.face === 'E' ? b.x1 : b.x0;
+      const alongX = b.face === 'N' || b.face === 'S';
+      const middle = alongX ? (b.x0 + b.x1) / 2 : (b.z0 + b.z1) / 2;
+      const doorAt = front + (ox + oz) * 0.7;
+      const door = { x: alongX ? middle : doorAt, z: alongX ? doorAt : middle, heading: FACING[b.face] };
+      // Rooms stack in layers under the town, so the big ones under neighbouring buildings never meet.
+      const y = -30 - (interiors.length % 4) * 12;
+      const built = buildInterior({ kind, building: i, x: (b.x0 + b.x1) / 2, y, z: (b.z0 + b.z1) / 2, yaw: FACING[b.face], door }, roomRng);
+      if (kind === 'home') home = interiors.length;
+      interiors.push(built.interior);
+      colliders.push(...built.colliders);
+    });
+  }
+
+  // ---- town blocks: a cluster of buildings (or a park, a square, a public building), all on a lawn
 
   function fillTownBlock(block: CityBlock, zone: 'residential' | 'commercial') {
     lots.push({ kind: 'lawn', x0: block.x0, z0: block.z0, x1: block.x1, z1: block.z1 });
     const taken: Rect[] = [];
+    if (block.service) {
+      placeService(block, zone, block.service, taken);
+      plant(block, zone, 'service', taken);
+      return;
+    }
     const roll = rng();
-    const kind = roll < (zone === 'commercial' ? 0.8 : 0.74) ? 'cluster' : roll < 0.92 ? 'park' : 'square';
+    const kind = roll < (zone === 'commercial' ? 0.86 : 0.82) ? 'cluster' : roll < 0.94 ? 'park' : 'square';
     if (kind === 'cluster') placeCluster(block, zone, taken);
     else if (kind === 'park') placePark(block, taken);
     else placeSquare(block, taken);
     plant(block, zone, kind, taken);
   }
 
-  /** World bounds of a town building turned by yaw, relative to its origin. */
-  function turnedBounds(model: TownBuilding, yaw: number): Rect {
-    const [x0, x1, z0, z1] = TOWN_BUILDINGS[model];
+  /** World bounds of a building turned by yaw, relative to its origin. */
+  function turnedBounds(model: string, yaw: number): Rect {
+    const [x0, x1, z0, z1] = footprintOf(model);
     const corners = [rotate(x0, z0, yaw), rotate(x1, z0, yaw), rotate(x0, z1, yaw), rotate(x1, z1, yaw)];
     return {
       x0: Math.min(...corners.map((c) => c[0])),
@@ -721,82 +901,254 @@ export function generateCity(options: CityOptions = {}): City {
     };
   }
 
+  /** A town (or public) building with its origin at (x, z), facing `face`, and its collider. */
+  function placeBuilding(zone: CityZone, model: string, x: number, z: number, face: Side, skin: number | undefined, withNeon: boolean): CityBuilding {
+    const yaw = FACING[face];
+    const b = turnedBounds(model, yaw);
+    const rect = { x0: x + b.x0, x1: x + b.x1, z0: z + b.z0, z1: z + b.z1 };
+    const [, , back, frontEdge, height] = footprintOf(model);
+    const service = model in SERVICE_BUILDINGS;
+    const piece = service ? `service/${model}` : `ub/${model}`;
+    const building: CityBuilding = { zone, style: 'town', ...rect, height, face, pieces: [{ piece, x, y: KERB_HEIGHT, z, yaw, skin, room: intBetween(rng, 0, 9999) }] };
+    buildings.push(building);
+    // Collide with the walls, not the steps in front (you walk up those): trim the front back to
+    // where a square body would end (the back is as far behind the middle as that front).
+    const core = { ...rect };
+    const [ox, oz] = OUT[face];
+    const steps = service ? 0 : frontEdge + back;
+    if (steps > 0.2) {
+      if (ox > 0) core.x1 -= steps;
+      if (ox < 0) core.x0 += steps;
+      if (oz > 0) core.z1 -= steps;
+      if (oz < 0) core.z0 += steps;
+    }
+    colliders.push({ x: (core.x0 + core.x1) / 2, y: KERB_HEIGHT + height / 2, z: (core.z0 + core.z1) / 2, hx: (core.x1 - core.x0) / 2, hy: height / 2, hz: (core.z1 - core.z0) / 2 });
+    if (withNeon) addSigns(building);
+    return building;
+  }
+
   /**
-   * 3 to 10 buildings shoulder to shoulder in the middle of the block: one row facing a street, or two
-   * rows back to back facing opposite streets. Each in its own colours, with flower beds along the
-   * fronts and a path from every door to the sidewalk.
+   * A row of town buildings shoulder to shoulder, centred along the block, all facing `face`, each in
+   * its own colours, with flower beds along the fronts and a path to the sidewalk from every other door.
+   * `line` is where their backs stand (or their fronts, with `byFront`). Any that would land on `avoid`
+   * are left out.
+   */
+  function placeRow(block: CityBlock, zone: 'residential' | 'commercial', face: Side, wanted: number, line: number, byFront: boolean, taken: Rect[], avoid: Rect[], skins: { last: number }) {
+    const alongX = face === 'N' || face === 'S';
+    const span = alongX ? block.x1 - block.x0 : block.z1 - block.z0;
+    const yaw = FACING[face];
+    const [ox, oz] = OUT[face];
+    const out = ox + oz;
+    const models: TownBuilding[] = [];
+    let length = 0;
+    for (let k = 0; k < wanted; k++) {
+      const model = pick(rng, TOWN_SETS[zone]);
+      const b = turnedBounds(model, yaw);
+      const w = alongX ? b.x1 - b.x0 : b.z1 - b.z0;
+      if (length + w > span - 12) break;
+      models.push(model);
+      length += w;
+    }
+    let cursor = (alongX ? block.x0 + block.x1 : block.z0 + block.z1) / 2 - length / 2;
+    for (const [index, model] of models.entries()) {
+      const b = turnedBounds(model, yaw);
+      const [lo, hi] = alongX ? [b.z0, b.z1] : [b.x0, b.x1];
+      // The back is the side away from the street; the front the other.
+      const across = line - (byFront ? (out > 0 ? hi : lo) : out > 0 ? lo : hi);
+      const x = alongX ? cursor - b.x0 : across;
+      const z = alongX ? across : cursor - b.z0;
+      cursor += alongX ? b.x1 - b.x0 : b.z1 - b.z0;
+      const rect = { x0: x + b.x0, x1: x + b.x1, z0: z + b.z0, z1: z + b.z1 };
+      if (avoid.some((r) => overlaps(r, rect))) continue;
+      let skin = intBetween(rng, 0, TOWN_SKINS - 1);
+      if (skin === skins.last) skin = (skin + 1) % TOWN_SKINS;
+      skins.last = skin;
+      placeBuilding(zone, model, x, z, face, skin, true);
+      backYard(zone, rect, face, taken, index === models.length - 1);
+      taken.push(expand(rect, 1.5));
+      frontGarden(block, zone, rect, face, taken, index % 2 === 0);
+    }
+  }
+
+  /**
+   * Odds and ends round the back and sides of a building: a dumpster and bin bags beside the last one
+   * in a row, a washing line in some back gardens.
+   */
+  function backYard(zone: 'residential' | 'commercial', rect: Rect, face: Side, taken: Rect[], last: boolean) {
+    const alongX = face === 'N' || face === 'S';
+    const [ox, oz] = OUT[face];
+    const out = ox + oz;
+    const back = face === 'N' ? rect.z0 : face === 'S' ? rect.z1 : face === 'E' ? rect.x0 : rect.x1;
+    const end = alongX ? rect.x1 : rect.z1;
+    if (last && rng() < (zone === 'commercial' ? 0.75 : 0.4)) {
+      // Beside the building's back corner, lid toward the side.
+      const at = (along: number, across: number): [number, number] => (alongX ? [along, across] : [across, along]);
+      const [dx, dz] = at(end + 1.2, back + out * 1.4);
+      const side: Side = alongX ? 'E' : 'N';
+      addProp('dumpster', dx, dz, side);
+      for (let k = 0; k < intBetween(rng, 1, 3); k++) {
+        const [bx, bz] = at(end + between(rng, 0.6, 1.8), back + out * between(rng, 2.6, 3.4));
+        props.push({ piece: 'prop/trah-bag-grey', x: bx, y: KERB_HEIGHT, z: bz, yaw: rng() * Math.PI * 2, scale: between(rng, 0.85, 1.15) });
+      }
+      taken.push(alongX ? { x0: end, x1: end + 2.6, z0: Math.min(back, back + out * 4), z1: Math.max(back, back + out * 4) } : { z0: end, z1: end + 2.6, x0: Math.min(back, back + out * 4), x1: Math.max(back, back + out * 4) });
+    }
+    if (zone === 'residential' && rng() < 0.3) {
+      const along = alongX ? (rect.x0 + rect.x1) / 2 : (rect.z0 + rect.z1) / 2;
+      const across = back - out * 3.5;
+      const [x, z] = alongX ? [along, across] : [across, along];
+      const spot = { x0: x - 1.2, x1: x + 1.2, z0: z - 1.2, z1: z + 1.2 };
+      if (!taken.some((r) => overlaps(r, spot))) {
+        addProp('washing-line', x, z, face);
+        taken.push(spot);
+      }
+    }
+  }
+
+  /**
+   * 4 to 14 buildings: up to 5 in one row in the middle of the block; up to 9 in two rows back to back
+   * facing the streets either side; more in two rows along those streets round a green courtyard.
    */
   function placeCluster(block: CityBlock, zone: 'residential' | 'commercial', taken: Rect[]) {
     const count = pick(rng, CLUSTER_SIZES[zone]);
-    const rows = count <= 5 ? 1 : 2;
     const alongX = block.x1 - block.x0 >= block.z1 - block.z0 ? rng() < 0.75 : rng() < 0.25;
-    const span = alongX ? block.x1 - block.x0 : block.z1 - block.z0;
-    const cx = (block.x0 + block.x1) / 2;
-    const cz = (block.z0 + block.z1) / 2;
-    let lastSkin = -1;
-    const all: Rect[] = [];
-    for (let row = 0; row < rows; row++) {
-      const wanted = row === 0 ? Math.ceil(count / rows) : Math.floor(count / rows);
-      // Facing: two rows look out both ways; a single row picks one.
-      const outward = rows === 2 ? row === 0 : rng() < 0.5;
-      const face: Side = alongX ? (outward ? 'N' : 'S') : outward ? 'E' : 'W';
-      const yaw = FACING[face];
-      const models: TownBuilding[] = [];
-      let length = 0;
-      for (let k = 0; k < wanted; k++) {
-        const model = pick(rng, TOWN_SETS[zone]);
-        const b = turnedBounds(model, yaw);
-        const w = alongX ? b.x1 - b.x0 : b.z1 - b.z0;
-        if (length + w > span - 12) break;
-        models.push(model);
-        length += w;
-      }
-      // Single rows sit back from the middle a little, leaving a bigger garden in front.
-      const line = rows === 2 ? 0 : (outward ? -1 : 1) * between(rng, 0, 4);
-      let cursor = (alongX ? cx : cz) - length / 2;
-      for (const [index, model] of models.entries()) {
-        const b = turnedBounds(model, yaw);
-        // The back of the building on the row's line, its side at the cursor.
-        let x: number;
-        let z: number;
-        if (alongX) {
-          x = cursor - b.x0;
-          z = face === 'N' ? cz + line - b.z0 : cz + line - b.z1;
-          cursor += b.x1 - b.x0;
-        } else {
-          z = cursor - b.z0;
-          x = face === 'E' ? cx + line - b.x0 : cx + line - b.x1;
-          cursor += b.z1 - b.z0;
-        }
-        const rect = { x0: x + b.x0, x1: x + b.x1, z0: z + b.z0, z1: z + b.z1 };
-        let skin = intBetween(rng, 0, TOWN_SKINS - 1);
-        if (skin === lastSkin) skin = (skin + 1) % TOWN_SKINS;
-        lastSkin = skin;
-        const height = TOWN_BUILDINGS[model][4];
-        const building: CityBuilding = { zone, style: 'town', ...rect, height, face, pieces: [{ piece: `ub/${model}`, x, y: KERB_HEIGHT, z, yaw, skin, room: intBetween(rng, 0, 9999) }] };
-        buildings.push(building);
-        all.push(rect);
-        // Collide with the walls, not the steps in front (you walk up those): trim the front back to
-        // where a square body would end (the back is as far behind the middle as that front).
-        const coreRect = { ...rect };
-        const [ox, oz] = OUT[face];
-        const [, , back, frontEdge] = TOWN_BUILDINGS[model];
-        const steps = frontEdge + back;
-        if (steps > 0.2) {
-          if (ox > 0) coreRect.x1 -= steps;
-          if (ox < 0) coreRect.x0 += steps;
-          if (oz > 0) coreRect.z1 -= steps;
-          if (oz < 0) coreRect.z0 += steps;
-        }
-        colliders.push({ x: (coreRect.x0 + coreRect.x1) / 2, y: KERB_HEIGHT + height / 2, z: (coreRect.z0 + coreRect.z1) / 2, hx: (coreRect.x1 - coreRect.x0) / 2, hy: height / 2, hz: (coreRect.z1 - coreRect.z0) / 2 });
-        addSigns(building);
-        // Neighbours share a path to the street (every other door), so a row isn't striped with them.
-        frontGarden(block, zone, rect, face, taken, index % 2 === 0);
+    const [lo, hi] = alongX ? [block.z0, block.z1] : [block.x0, block.x1];
+    const mid = (lo + hi) / 2;
+    const [up, down]: Side[] = alongX ? ['N', 'S'] : ['E', 'W'];
+    const skins = { last: -1 };
+    if (count <= 5) {
+      // One row, back from the middle a little, leaving a bigger garden in front.
+      const outward = rng() < 0.5;
+      placeRow(block, zone, outward ? up : down, count, mid + (outward ? -1 : 1) * between(rng, 0, 4), false, taken, [], skins);
+    } else if (count <= 9) {
+      placeRow(block, zone, up, Math.ceil(count / 2), mid, false, taken, [], skins);
+      placeRow(block, zone, down, Math.floor(count / 2), mid, false, taken, [], skins);
+    } else {
+      const setback = between(rng, 6, 8);
+      placeRow(block, zone, up, Math.ceil(count / 2), hi - setback, true, taken, [], skins);
+      placeRow(block, zone, down, Math.floor(count / 2), lo + setback, true, taken, [], skins);
+      // A path down the courtyard, out to the sidewalks at both ends.
+      const path = alongX ? { x0: block.x0, x1: block.x1, z0: mid - 1, z1: mid + 1 } : { x0: mid - 1, x1: mid + 1, z0: block.z0, z1: block.z1 };
+      lots.push({ kind: 'path', ...path });
+      taken.push(expand(path, 0.8));
+    }
+  }
+
+  /**
+   * A public building facing one street, set back behind a paved forecourt with its name board by the
+   * sidewalk, a car park (or playground, or square) beside it, and a row of houses or shops behind it
+   * facing the street on the other side.
+   */
+  function placeService(block: CityBlock, zone: 'residential' | 'commercial', service: CityService, taken: Rect[]) {
+    const spec = SERVICES[service];
+    const wide = block.x1 - block.x0 >= block.z1 - block.z0;
+    const face: Side = wide ? (rng() < 0.5 ? 'N' : 'S') : rng() < 0.5 ? 'E' : 'W';
+    const alongX = face === 'N' || face === 'S';
+    const [ox, oz] = OUT[face];
+    const out = ox + oz;
+    const edge = face === 'N' ? block.z1 : face === 'S' ? block.z0 : face === 'E' ? block.x1 : block.x0;
+    const back = face === 'N' ? block.z0 : face === 'S' ? block.z1 : face === 'E' ? block.x0 : block.x1;
+    const [a0, a1] = alongX ? [block.x0, block.x1] : [block.z0, block.z1];
+    const yaw = FACING[face];
+    const b = turnedBounds(spec.model, yaw);
+    const width = alongX ? b.x1 - b.x0 : b.z1 - b.z0;
+    const yardWidth = Math.min(28, a1 - a0 - width - 11);
+    const mirrored = rng() < 0.5;
+    const s0 = yardWidth >= 10 ? (mirrored ? a1 - 4 - width : a0 + 4) : (a0 + a1 - width) / 2;
+    const s1 = s0 + width;
+    const frontLine = edge - out * 10;
+    const across = frontLine - (alongX ? (out > 0 ? b.z1 : b.z0) : out > 0 ? b.x1 : b.x0);
+    const x = alongX ? s0 - b.x0 : across;
+    const z = alongX ? across : s0 - b.z0;
+    const building = placeBuilding(zone, spec.model, x, z, face, spec.skin, false);
+    serviceOf.set(building, service);
+    taken.push(expand(building, 1.5));
+    const span = (p0: number, p1: number, q0: number, q1: number): Rect =>
+      alongX ? { x0: p0, x1: p1, z0: Math.min(q0, q1), z1: Math.max(q0, q1) } : { x0: Math.min(q0, q1), x1: Math.max(q0, q1), z0: p0, z1: p1 };
+    // Forecourt: paving from the doors to the sidewalk, flower beds along its sides.
+    const fore = span(s0 - 1, s1 + 1, frontLine, edge);
+    lots.push({ kind: 'plaza', ...fore });
+    taken.push(fore);
+    for (const t of [s0 - 1.8, s1 + 1.8]) {
+      for (let q = 1.5; q < 9; q += 1.2) {
+        const c = edge - out * q;
+        addPlant(pick(rng, FLOWERS), alongX ? t : c, alongX ? c : t, 0.8, 1.1);
       }
     }
-    if (all.length) {
-      const r = all.reduce((a, b) => ({ x0: Math.min(a.x0, b.x0), x1: Math.max(a.x1, b.x1), z0: Math.min(a.z0, b.z0), z1: Math.max(a.z1, b.z1) }));
-      taken.push({ x0: r.x0 - 1.5, x1: r.x1 + 1.5, z0: r.z0 - 1.5, z1: r.z1 + 1.5 });
+    // The name board by the sidewalk, off to one side of the doors.
+    const along = s0 + width * (mirrored ? 0.22 : 0.78);
+    const at = edge - out * 2.2;
+    addBoard(spec.name, alongX ? along : at, alongX ? at : along, face, spec.background, spec.color);
+    // Beside it: a car park, a playground or a little square.
+    const yard = yardWidth >= 10 ? (mirrored ? span(a0 + 3, s0 - 4, edge - out * 2, edge - out * 19) : span(s1 + 4, a1 - 3, edge - out * 2, edge - out * 19)) : undefined;
+    if (yard) {
+      taken.push(yard);
+      if (spec.yard === 'parking') {
+        lots.push({ kind: 'parking', ...yard });
+        parkCars(yard, alongX, spec.fill ?? 0.5, spec.cars ?? CIVILIAN_CARS);
+      } else if (spec.yard === 'playground') {
+        lots.push({ kind: 'dirt', ...yard });
+        const cx = (yard.x0 + yard.x1) / 2;
+        const cz = (yard.z0 + yard.z1) / 2;
+        for (const s of [-1, 1]) {
+          const [bx, bz] = alongX ? [cx + s * 4, yard.z0 + 1.2] : [yard.x0 + 1.2, cz + s * 4];
+          addProp('bench', bx, bz, alongX ? 'N' : 'E');
+        }
+        addProp('trash-can', alongX ? cx : yard.x0 + 1.2, alongX ? yard.z0 + 1.2 : cz, alongX ? 'N' : 'E');
+      } else {
+        lots.push({ kind: 'plaza', ...yard });
+        const cx = (yard.x0 + yard.x1) / 2;
+        const cz = (yard.z0 + yard.z1) / 2;
+        for (const [dx, dz] of [[-1, -1], [1, -1], [-1, 1], [1, 1]] as const) {
+          const px = cx + dx * (yard.x1 - yard.x0) * 0.28;
+          const pz = cz + dz * (yard.z1 - yard.z0) * 0.28;
+          props.push({ piece: 'Prop_Planter_Single', x: px, y: KERB_HEIGHT, z: pz, yaw: 0 });
+          colliders.push({ x: px, y: KERB_HEIGHT + 0.3, z: pz, hx: 1, hy: 0.3, hz: 1 });
+          addPlant(pick(rng, FLOWERS), px, pz, 0.7, 0.9);
+        }
+        addProp('bench', cx, cz, face);
+      }
+    }
+    // Houses or shops behind, facing the other street.
+    placeRow(block, zone, opposite(face), intBetween(rng, 3, 5), back + out * 7, true, taken, [expand(building, 3), ...(yard ? [yard] : [])], { last: spec.skin ?? -1 });
+  }
+
+  /** A name board on two posts, its face toward `face`. */
+  function addBoard(text: string, x: number, z: number, face: Side, background: string, color: string) {
+    const yaw = FACING[face];
+    const w = Math.max(3.4, text.length * 0.55 + 1.2);
+    const h = 1.3;
+    const y = KERB_HEIGHT + 1.6;
+    const frame = '#34343c';
+    shapes.push({ kind: 'box', x, y: y - h / 2 - 0.1, z, w: w + 0.2, h: h + 0.2, d: 0.16, yaw, color: frame });
+    for (const s of [-1, 1]) {
+      const [px, pz] = rotate(s * (w / 2 - 0.4), 0, yaw);
+      shapes.push({ kind: 'box', x: x + px, y: KERB_HEIGHT, z: z + pz, w: 0.14, h: y - h / 2 - KERB_HEIGHT, d: 0.14, yaw, color: frame });
+    }
+    const [fx, fz] = rotate(0, 0.09, yaw);
+    signs.push({ text, x: x + fx, y, z: z + fz, yaw, w, h, background, color });
+    const across = face === 'E' || face === 'W';
+    colliders.push({ x, y: y / 2 + 0.4, z, hx: across ? 0.1 : w / 2, hy: y / 2 + 0.4, hz: across ? w / 2 : 0.1 });
+  }
+
+  /** Cars nose-in along both long sides of a car park, in some of the bays. */
+  function parkCars(lot: Rect, alongX: boolean, fill: number, models: readonly Car[]) {
+    const length = alongX ? lot.x1 - lot.x0 : lot.z1 - lot.z0;
+    const bays = Math.floor(length / 2.8);
+    if (bays < 1) return;
+    const pitch = length / bays;
+    for (const row of [0, 1]) {
+      const side: Side = alongX ? (row === 0 ? 'S' : 'N') : row === 0 ? 'W' : 'E';
+      const c = alongX ? (row === 0 ? lot.z0 + 2.7 : lot.z1 - 2.7) : row === 0 ? lot.x0 + 2.7 : lot.x1 - 2.7;
+      for (let k = 0; k < bays; k++) {
+        if (rng() >= fill) continue;
+        const t = (alongX ? lot.x0 : lot.z0) + (k + 0.5) * pitch;
+        const model = pick(rng, models);
+        const [w, l, h] = CARS[model];
+        const x = alongX ? t : c;
+        const z = alongX ? c : t;
+        props.push({ piece: `car/${model}`, x, y: KERB_HEIGHT, z, yaw: FACING[side] + between(rng, -0.04, 0.04) });
+        colliders.push({ x, y: KERB_HEIGHT + h / 2, z, hx: (alongX ? w : l) / 2, hy: h / 2, hz: (alongX ? l : w) / 2 });
+      }
     }
   }
 
@@ -825,6 +1177,18 @@ export function generateCity(options: CityOptions = {}): City {
         else addPlant(pick(rng, FLOWERS), x, z, 0.8, 1.2);
       }
     }
+    // Bicycles parked against the front by the door.
+    if (Math.abs(edge - front) > 3 && rng() < (zone === 'commercial' ? 0.35 : 0.15)) {
+      const side = rng() < 0.5 ? 1 : -1;
+      for (let k = 0; k < intBetween(rng, 1, 2); k++) {
+        const t = door + side * (2.4 + k * 1.95);
+        if (t < a0 + 0.9 || t > a1 - 0.9) break;
+        const across = front + Math.sign(edge - front) * 0.55;
+        const [x, z] = alongX ? [t, across] : [across, t];
+        // Leaning along the wall.
+        props.push({ piece: 'prop/bicycle', x, y: KERB_HEIGHT, z, yaw: FACING[face] + between(rng, -0.05, 0.05) });
+      }
+    }
     if (withPath && zone === 'residential' && rng() < 0.5) {
       // A mailbox by the path where it meets the sidewalk.
       const t = door + 1.4;
@@ -834,7 +1198,7 @@ export function generateCity(options: CityOptions = {}): City {
     }
   }
 
-  /** A park: crossing paths, benches and bins along them, trees and a big old tree in one corner. */
+  /** A park: crossing paths with a ring of flowers where they meet, benches and bins, a big old tree. */
   function placePark(block: CityBlock, taken: Rect[]) {
     const cx = (block.x0 + block.x1) / 2;
     const cz = (block.z0 + block.z1) / 2;
@@ -845,10 +1209,20 @@ export function generateCity(options: CityOptions = {}): City {
     ];
     for (const path of paths) {
       lots.push({ kind: 'path', ...path });
-      taken.push({ x0: path.x0 - 0.8, x1: path.x1 + 0.8, z0: path.z0 - 0.8, z1: path.z1 + 0.8 });
+      taken.push(expand(path, 0.8));
     }
+    // Flowers round the crossing, in the four corners between the paths.
+    const ring = 4.2;
+    for (let a = 0; a < 32; a++) {
+      const angle = ((a + 0.5) / 32) * Math.PI * 2;
+      const x = Math.cos(angle) * ring;
+      const z = Math.sin(angle) * ring;
+      if (Math.abs(x) < half + 0.8 || Math.abs(z) < half + 0.8) continue;
+      addPlant(pick(rng, FLOWERS), cx + x, cz + z, 0.9, 1.2);
+    }
+    taken.push({ x0: cx - ring - 1, x1: cx + ring + 1, z0: cz - ring - 1, z1: cz + ring + 1 });
     // Benches facing the paths, each with a bin.
-    for (const [dx, dz, face] of [[8, 1, 'S'], [-8, -1, 'N'], [1, 8, 'W'], [-1, -8, 'E']] as const) {
+    for (const [dx, dz, face] of [[9, 1, 'S'], [-9, -1, 'N'], [1, 9, 'W'], [-1, -9, 'E']] as const) {
       const off = half + 1.2;
       const x = cx + (Math.abs(dx) > 1 ? dx : dx * off);
       const z = cz + (Math.abs(dz) > 1 ? dz : dz * off);
@@ -856,77 +1230,97 @@ export function generateCity(options: CityOptions = {}): City {
       addProp('trash-can', x + (face === 'N' || face === 'S' ? 1.5 : 0), z + (face === 'E' || face === 'W' ? 1.5 : 0), face);
     }
     // A big old tree in the middle of one quarter.
-    const qx = cx + (rng() < 0.5 ? -1 : 1) * (block.x1 - block.x0) / 4;
-    const qz = cz + (rng() < 0.5 ? -1 : 1) * (block.z1 - block.z0) / 4;
+    const qx = cx + ((rng() < 0.5 ? -1 : 1) * (block.x1 - block.x0)) / 4;
+    const qz = cz + ((rng() < 0.5 ? -1 : 1) * (block.z1 - block.z0)) / 4;
     addTree(pick(rng, ['twisted-tree', 'twisted-tree-3']), qx, qz, 0.6, 0.75);
-    taken.push({ x0: qx - 5, x1: qx + 5, z0: qz - 5, z1: qz + 5 });
+    taken.push({ x0: qx - 6, x1: qx + 6, z0: qz - 6, z1: qz + 6 });
     for (let r = intBetween(rng, 2, 4); r > 0; r--) {
       addPlant(pick(rng, ['rock-medium', 'rock-medium-3']), between(rng, block.x0 + 3, block.x1 - 3), between(rng, block.z0 + 3, block.z1 - 3), 0.7, 1.2);
     }
   }
 
-  /** A paved square with planters, and a parking lot beside it. */
+  /** A paved square with planters, and a car park beside it. */
   function placeSquare(block: CityBlock, taken: Rect[]) {
     const w = block.x1 - block.x0;
     const d = block.z1 - block.z0;
     const plaza = { x0: block.x0 + 4, x1: block.x0 + w * 0.55, z0: block.z0 + 4, z1: block.z1 - 4 };
     lots.push({ kind: 'plaza', ...plaza });
     taken.push(plaza);
-    for (let t = 0; t < 5; t++) {
-      const px = between(rng, plaza.x0 + 2, plaza.x1 - 2);
-      const pz = between(rng, plaza.z0 + 2, plaza.z1 - 2);
-      props.push({ piece: 'Prop_Planter_Single', x: px, y: KERB_HEIGHT, z: pz, yaw: 0 });
-      colliders.push({ x: px, y: KERB_HEIGHT + 0.3, z: pz, hx: 1, hy: 0.3, hz: 1 });
-      addPlant(pick(rng, FLOWERS), px, pz, 0.7, 0.9);
+    // Planters in two neat lines down the square.
+    const pw = plaza.x1 - plaza.x0;
+    for (const fx of [0.25, 0.75]) {
+      for (let pz = plaza.z0 + 4; pz < plaza.z1 - 3; pz += 8) {
+        const px = plaza.x0 + pw * fx;
+        props.push({ piece: 'Prop_Planter_Single', x: px, y: KERB_HEIGHT, z: pz, yaw: 0 });
+        colliders.push({ x: px, y: KERB_HEIGHT + 0.3, z: pz, hx: 1, hy: 0.3, hz: 1 });
+        addPlant(pick(rng, FLOWERS), px, pz, 0.7, 0.9);
+      }
     }
     addProp('bench', (plaza.x0 + plaza.x1) / 2, plaza.z0 + 1.5, 'N');
-    const bays = Math.floor((d - 8) / 2.6) * 2.6;
+    const bays = Math.floor((d - 8) / 2.8) * 2.8;
     const parking = { x0: block.x0 + w * 0.6, x1: block.x0 + w * 0.6 + 17, z0: block.z0 + 4, z1: block.z0 + 4 + bays };
     if (parking.x1 < block.x1 - 2) {
       lots.push({ kind: 'parking', ...parking });
       taken.push(parking);
+      parkCars(parking, false, 0.55, CIVILIAN_CARS);
     }
   }
 
-  /** Trees, bushes, flowers, grass tufts and rocks on the open lawn, kept off buildings and paths. */
-  function plant(block: CityBlock, zone: 'residential' | 'commercial', kind: 'cluster' | 'park' | 'square', taken: Rect[]) {
+  /**
+   * Trees in rows on a regular grid across the block wherever it's clear (avenues along the gardens, an
+   * orchard in a courtyard or a park), then a few bushes, flowers, grass tufts and rocks on the lawn.
+   */
+  function plant(block: CityBlock, zone: 'residential' | 'commercial', kind: 'cluster' | 'park' | 'square' | 'service', taken: Rect[]) {
     const placed: [number, number, number][] = []; // x, z, radius
+    const clear = (x: number, z: number, radius: number) =>
+      !taken.some((r) => x > r.x0 - radius && x < r.x1 + radius && z > r.z0 - radius && z < r.z1 + radius) &&
+      !placed.some(([px, pz, pr]) => (px - x) ** 2 + (pz - z) ** 2 < (pr + radius) ** 2);
     const tryAt = (radius: number, inset: number): [number, number] | undefined => {
       for (let t = 0; t < 14; t++) {
         const x = between(rng, block.x0 + inset, block.x1 - inset);
         const z = between(rng, block.z0 + inset, block.z1 - inset);
-        if (taken.some((r) => x > r.x0 - radius && x < r.x1 + radius && z > r.z0 - radius && z < r.z1 + radius)) continue;
-        if (placed.some(([px, pz, pr]) => (px - x) ** 2 + (pz - z) ** 2 < (pr + radius) ** 2)) continue;
+        if (!clear(x, z, radius)) continue;
         placed.push([x, z, radius]);
         return [x, z];
       }
       return undefined;
     };
-    const area = ((block.x1 - block.x0) * (block.z1 - block.z0)) / 3000; // about 1 for a normal block
-    const trees = Math.round((kind === 'park' ? intBetween(rng, 14, 20) : kind === 'square' ? 3 : intBetween(rng, 4, 7)) * area);
-    const kinds = zone === 'commercial' ? [...TREES, 'tree-4', 'tree-5'] : [...TREES, ...PINES];
-    for (let t = 0; t < trees; t++) {
-      const at = tryAt(2.6, 3);
-      if (at) addTree(pick(rng, kinds), at[0], at[1]);
+    // One kind of tree per block, all much the same size, on a grid centred on the block.
+    const spacing = kind === 'park' ? 9 : 12;
+    const treeKind = pick(rng, zone === 'commercial' ? ['tree-4', 'tree-5'] : ['tree', 'tree-4', 'tree-5']);
+    const cx = (block.x0 + block.x1) / 2;
+    const cz = (block.z0 + block.z1) / 2;
+    const inset = 3;
+    const startX = cx - Math.floor((cx - block.x0 - inset) / spacing) * spacing;
+    const startZ = cz - Math.floor((cz - block.z0 - inset) / spacing) * spacing;
+    for (let x = startX; x <= block.x1 - inset; x += spacing) {
+      for (let z = startZ; z <= block.z1 - inset; z += spacing) {
+        if (!clear(x, z, 2.4)) continue;
+        placed.push([x, z, 2.4]);
+        // Parks: every other row of pines.
+        const pines = kind === 'park' && Math.round((z - startZ) / spacing) % 2 === 1;
+        addTree(pines ? 'pine-5' : treeKind, x, z, 0.85, 0.95);
+      }
     }
-    for (let b = Math.round(intBetween(rng, 5, 10) * area); b > 0; b--) {
+    const area = ((block.x1 - block.x0) * (block.z1 - block.z0)) / 3000; // about 1 for a normal block
+    for (let b = Math.round(intBetween(rng, 3, 6) * area); b > 0; b--) {
       const at = tryAt(1, 1.2);
       if (at) addPlant(pick(rng, ['bush', 'bush', 'bush-with-flowers']), at[0], at[1], 0.9, 1.3);
     }
-    for (let f = Math.round(intBetween(rng, 6, 12) * area); f > 0; f--) {
+    for (let f = Math.round(intBetween(rng, 4, 8) * area); f > 0; f--) {
       const at = tryAt(0.6, 1);
       if (at) addPlant(pick(rng, FLOWERS), at[0], at[1], 0.8, 1.2);
     }
-    for (let g = Math.round(intBetween(rng, 30, 50) * area); g > 0; g--) {
+    for (let g = Math.round(intBetween(rng, 25, 40) * area); g > 0; g--) {
       const at = tryAt(0.3, 0.8);
       if (at) addPlant(pick(rng, GROUND_COVER), at[0], at[1], 0.8, 1.4);
     }
     // A billboard by a downtown corner, facing the wider street.
-    if (zone === 'commercial' && kind !== 'park' && rng() < 0.3) {
+    if (zone === 'commercial' && (kind === 'cluster' || kind === 'square') && rng() < 0.3) {
       const sx = rng() < 0.5 ? 1 : -1;
       const x = sx > 0 ? block.x1 - 4 : block.x0 + 4;
       const z = (block.z0 + block.z1) / 2 + between(rng, -8, 8);
-      if (!taken.some((r) => x > r.x0 - 4 && x < r.x1 + 4 && z > r.z0 - 4 && z < r.z1 + 4)) addProp(rng() < 0.5 ? 'billboard' : 'billboard-2', x, z, sx > 0 ? 'E' : 'W');
+      if (clear(x, z, 4)) addProp(rng() < 0.5 ? 'billboard' : 'billboard-2', x, z, sx > 0 ? 'E' : 'W');
     }
   }
 
@@ -1234,6 +1628,10 @@ export function generateCity(options: CityOptions = {}): City {
     spots,
     neon,
     lights,
+    signs,
+    graph,
+    interiors,
+    home,
   };
 }
 

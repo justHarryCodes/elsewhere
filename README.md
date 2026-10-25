@@ -88,16 +88,37 @@ The header toggle switches between the Babylon.js and Three.js renderers.
   server and every client, so nothing about it is sent over the network except the seed (`citySeed` in the room
   state). About 1 km (X) by 600 m (Z): 4-lane streets (the Downtown City MegaKit's pieces) around blocks about 55 m
   across. **Old Town** at -X, **Downtown** (taller) in the middle, **Industry** at +X.
-- **Clusters**: most town blocks hold one cluster of 3 to 10 buildings from Quaternius' **Ultimate Buildings Pack**,
-  shoulder to shoulder in the middle of the block (two rows back to back when it's big), mixed heights (1 to 6
-  storeys) and each in one of the pack's ten colour schemes, with flower beds along the fronts and paths to the
-  sidewalk. Other blocks are parks (crossing paths, benches, a big old tree) or paved squares with parking.
-- **Green and street furniture**: lawns, trees, bushes, flowers, grass and rocks from the **Stylized Nature MegaKit**;
-  street trees, benches with bins, hydrants, mailboxes, power boxes, ATMs, bus stops, billboards, stop signs and
-  downtown traffic lights from `city-pack`. Industry keeps works halls assembled from the MegaKit's modules, with
-  tanks, chimneys and containers.
+- **Clusters**: most town blocks hold a cluster of 4 to 14 buildings from Quaternius' **Ultimate Buildings Pack**,
+  mixed heights (1 to 6 storeys), each in one of the pack's ten colour schemes, with flower beds along the fronts and
+  paths to the sidewalk: up to 5 in a row in the middle of the block, up to 9 in two rows back to back, more in two
+  rows along the streets either side of a green courtyard. Other blocks are parks (crossing paths, a ring of flowers,
+  benches, rows of trees and pines, a big old tree) or paved squares with planters and a car park.
+- **Public buildings**, each on its own block with a paved forecourt and a name board by the sidewalk: **Town Hall**
+  (the downtown block nearest the middle, with a square), **Police** (police cars in its car park), **Hospital**
+  (city-pack's hospital, ambulances), **Bank**, and in Old Town the **Fire Station**, **School** (with a playground),
+  **Post Office** (vans) and **Library**, with a row of houses or shops behind each.
+- **Green and street furniture**: lawns, flowers, grass and rocks from the **Stylized Nature MegaKit**, and trees in
+  rows: an even avenue down both sidewalks of every street (one kind per street) and a regular grid across each block
+  wherever it's clear. Benches with bins, hydrants, mailboxes, power boxes, ATMs, bus stops, billboards, stop signs,
+  downtown traffic lights, manhole covers, bicycles by the doors, dumpsters and bin bags beside the rows, washing
+  lines in back gardens, parked cars (`city-pack`). Industry keeps works halls assembled from the MegaKit's modules,
+  with tanks, chimneys and containers.
+- **Traffic and people** (`packages/shared/src/traffic.ts`, drawn by `game/babylon/townLife.ts`): about 28 cars
+  drive the streets round the player, in lane, choosing a street at every junction, following the car ahead,
+  stopping at red lights downtown and taking turns at the other junctions, and stopping for people and players.
+  About 40 people (the modular characters, walk and idle clips) walk round the blocks, stop now and then, cross at
+  the corners when no car is close, and some walk a dog (Kenney's cube pets). It's ambient, so each client runs its
+  own round its player; in `/sandbox` the cars are also solid (kinematic boxes) to the character and the car.
+- **Going inside**: the player's **home** (a house in the middle of Old Town: **My home** in the sandbox) and every
+  public building, plus about a fifth of the houses and a third of the downtown buildings (shops, cafés, offices),
+  can be entered: walk up to the front door and press **E**. The room (`packages/shared/src/interiors.ts`) is laid out
+  for what the building is, furnished from Kenney's furniture kit and the office / coffeehouse packs: the home has a
+  living room, kitchen and dining table, bedroom and bathroom; the police station desks and a front counter, the
+  hospital a ward, the school a classroom, the library shelves and reading tables, and so on. Rooms are built under
+  their buildings (with colliders, so the server walks you round them too) and seen doll's-house style from above;
+  the door inside takes you back out.
 - Packing for the web: `scripts/city/pack_megakit.py` (streets, works) and `scripts/city/pack_town.py` (buildings,
-  nature, props: OBJ and glb, scaled to metres) write `public/assets/city/{megakit,town}/`. Rerun them if the packs
+  the hospital, parked cars, nature, props and furniture: OBJ and glb, scaled to metres) write `public/assets/city/{megakit,town}/`. Rerun them if the packs
   change; `game/megakit.ts` loads both and welds placed pieces into one batch per material (per colour scheme).
 - Physics: `addCityColliders(sim, city)` (`@game/shared/physics`) adds the lots, sidewalks, buildings and solid props
   as boxes. The server moves players with the same physical walker as the sandbox (`physics-walker.ts`), so they're
@@ -106,9 +127,12 @@ The header toggle switches between the Babylon.js and Three.js renderers.
   within 260 m are built nearest first, one per frame, rising out of the ground; chunks more than 360 m behind sink
   away and are freed. Each chunk is a dozen meshes (one per material). The Three.js renderer
   (`game/three/city.ts`) builds the same city all at once, with the day look only.
-- **Cyberpunk nights** (**N** or the ☾/☀ button; day is the default): a violet sky and purple haze, lit windows,
-  neon tubes over shop fronts, blade signs, rooftop billboards and tower outlines (`city.neon`), street lamps in cyan, pink and amber throwing pools of light
-  (`city.lights`), and a soft light over the player. `game/babylon/atmosphere.ts` holds the day and night looks.
+- **Sky** (`game/babylon/sky.ts`): painted panoramas on a dome round the camera: by day blue with drifting clouds and
+  a pale haze at the horizon; by night deep blue with stars, a moon, and the city's glow along the horizon.
+- **Big-city nights** (**N** or the ☾/☀ button; day is the default): bright enough to see the whole street, most
+  windows lit, warm-white street lamps (amber in Old Town) throwing pools of light (`city.lights`), car headlights,
+  and the neon (tubes over shop fronts, blade signs, rooftop billboards, tower outlines: `city.neon`) that only comes
+  on after dark. `game/babylon/atmosphere.ts` holds the day and night looks.
 - **Camera and map** (`game/CameraControls.tsx`, `game/CityMap.tsx`, in the game and the sandbox): Street / Chase /
   Top views (**V** cycles), turn and zoom buttons, and a neon city map (**M**): click anywhere on it to go there (to
   the nearest sidewalk if you click inside a building). In the game the server moves you (`Messages.Teleport`).

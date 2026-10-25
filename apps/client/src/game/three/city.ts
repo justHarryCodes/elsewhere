@@ -1,5 +1,5 @@
 import * as THREE from 'three';
-import { KERB_HEIGHT, type City, type CityShape } from '@game/shared';
+import { KERB_HEIGHT, type City, type CityShape, type CitySign } from '@game/shared';
 import { type Batch, MegaKit, ROOM_MATERIALS, ROOM_TEXTURES } from '../megakit';
 
 /**
@@ -16,9 +16,10 @@ export class CityRenderer {
     const renderer = new CityRenderer();
     renderer.root.name = 'city';
     const kit = await MegaKit.load();
-    const pieces = [...city.streets, ...city.props, ...city.buildings.flatMap((b) => b.pieces)];
+    const pieces = [...city.streets, ...city.props, ...city.buildings.flatMap((b) => b.pieces), ...city.interiors.flatMap((r) => r.pieces)];
     for (const [key, batch] of kit.weld(pieces)) renderer.root.add(renderer.batchMesh(batch, renderer.material(kit, key)));
-    renderer.addShapes(city.shapes);
+    renderer.addShapes([...city.shapes, ...city.interiors.flatMap((r) => r.shapes)]);
+    renderer.addSigns(city.signs);
     renderer.addGround(city, kit);
     return renderer;
   }
@@ -109,6 +110,32 @@ export class CityRenderer {
       });
       mesh.computeBoundingSphere();
       this.root.add(mesh);
+    }
+  }
+
+  /** The public buildings' name boards. */
+  private addSigns(signs: CitySign[]) {
+    for (const sign of signs) {
+      const canvas = document.createElement('canvas');
+      canvas.height = 128;
+      canvas.width = Math.round((128 * sign.w) / sign.h);
+      const ctx = canvas.getContext('2d')!;
+      ctx.fillStyle = sign.background;
+      ctx.fillRect(0, 0, canvas.width, canvas.height);
+      ctx.fillStyle = sign.color;
+      ctx.font = 'bold 72px Arial, sans-serif';
+      ctx.textAlign = 'center';
+      ctx.textBaseline = 'middle';
+      ctx.fillText(sign.text, canvas.width / 2, 69, canvas.width * 0.92);
+      const texture = new THREE.CanvasTexture(canvas);
+      texture.colorSpace = THREE.SRGBColorSpace;
+      const material = new THREE.MeshStandardMaterial({ map: texture, roughness: 0.8, emissiveMap: texture, emissive: 0x595959 });
+      const geometry = new THREE.PlaneGeometry(sign.w, sign.h);
+      this.disposables.push(texture, material, geometry);
+      const board = new THREE.Mesh(geometry, material);
+      board.position.set(sign.x, sign.y, sign.z);
+      board.rotation.y = sign.yaw; // the plane faces +Z
+      this.root.add(board);
     }
   }
 

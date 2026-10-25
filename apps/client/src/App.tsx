@@ -3,6 +3,7 @@ import { generateCity } from "@game/shared";
 import { BabylonScene, type SceneControls } from "./game/babylon/BabylonScene";
 import { type CameraView, CameraControls } from "./game/CameraControls";
 import { CityMap } from "./game/CityMap";
+import { DoorPrompt } from "./game/DoorPrompt";
 import { ThreeScene } from "./game/three/ThreeScene";
 import { ACTION_HOTKEYS, useActionHotkeys } from "./game/useActionHotkeys";
 import { useKeyboardInput } from "./game/useKeyboardInput";
@@ -12,7 +13,7 @@ type Renderer = "babylon" | "three";
 
 export function App() {
   const [renderer, setRenderer] = useState<Renderer>("babylon");
-  const { status, players, playerIds, sessionId, citySeed, sendInput, sendAction, sendTeleport } =
+  const { status, players, playerIds, sessionId, citySeed, sendInput, sendAction, sendTeleport, sendDoor } =
     useGameRoom();
   useKeyboardInput(sendInput);
   useActionHotkeys(sendAction);
@@ -26,6 +27,11 @@ export function App() {
     const player = sessionId ? players.current.get(sessionId) : undefined;
     return player && { x: player.x, z: player.z, heading: player.heading };
   }, [players, sessionId]);
+  const myPosition = useCallback(() => {
+    const player = sessionId ? players.current.get(sessionId) : undefined;
+    return player && { x: player.x, y: player.y, z: player.z };
+  }, [players, sessionId]);
+  const goThroughDoor = useCallback(() => sendDoor(), [sendDoor]);
 
   return (
     <div className="relative h-full w-full overflow-hidden bg-slate-950 text-slate-100">
@@ -36,6 +42,19 @@ export function App() {
       )}
       {mapOpen && city && (
         <CityMap city={city} player={me} onNavigate={sendTeleport} onClose={() => setMapOpen(false)} />
+      )}
+      {city && <DoorPrompt city={city} player={myPosition} onDoor={goThroughDoor} />}
+      {city && city.home >= 0 && (
+        <button
+          type="button"
+          onClick={(event) => {
+            sendDoor(true);
+            event.currentTarget.blur();
+          }}
+          className="absolute right-4 bottom-20 z-10 rounded-lg bg-amber-700/90 px-3 py-1.5 text-sm shadow-lg hover:bg-amber-600"
+        >
+          My home
+        </button>
       )}
       <div className="absolute right-4 bottom-4 z-10">
         <CameraControls

@@ -114,6 +114,18 @@ export function SandboxPage() {
         </div>
       )}
 
+      {stats?.door && (
+        <div className="pointer-events-none absolute bottom-8 left-1/2 -translate-x-1/2 rounded-lg bg-slate-950/80 px-4 py-2 text-sm">
+          Press <kbd className="rounded bg-slate-700 px-1.5 py-0.5 font-mono">E</kbd>{' '}
+          {stats.door.inside ? `to go out` : `to go into ${stats.door.name === 'Your home' ? 'your home' : stats.door.name}`}
+        </div>
+      )}
+      {stats?.room && !stats.door && (
+        <div className="pointer-events-none absolute top-4 left-1/2 -translate-x-1/2 rounded-lg bg-slate-950/70 px-3 py-1 text-xs">
+          {stats.room}
+        </div>
+      )}
+
       {stats?.driving && stats.vehicle && (
         <div className="pointer-events-none absolute right-6 bottom-6 flex items-end gap-4 rounded-xl bg-slate-950/80 px-5 py-4">
           <div className="text-right">
@@ -262,8 +274,9 @@ export function SandboxPage() {
           <h2 className="text-sm font-semibold">City</h2>
           <p className="text-xs text-slate-400">
             1 km of streets north of the yard: homes to the west, downtown in the middle, industry to the east.
+            Press E at a door to go in.
           </p>
-          <div className="grid grid-cols-4 gap-1">
+          <div className="grid grid-cols-5 gap-1">
             {PLACES.map(({ place, label }) => (
               <button
                 key={place}
@@ -277,6 +290,16 @@ export function SandboxPage() {
                 {label}
               </button>
             ))}
+            <button
+              type="button"
+              onClick={(event) => {
+                sandbox()?.goHome();
+                event.currentTarget.blur();
+              }}
+              className="rounded-md bg-amber-700 px-1 py-1 text-xs hover:bg-amber-600"
+            >
+              My home
+            </button>
           </div>
         </section>
 

@@ -10,6 +10,9 @@ import {
   Messages,
   PLAYER_SPEED,
   TeleportMessage,
+  type DoorMessage,
+  KERB_HEIGHT,
+  interiorDoorAt,
   generateCity,
   arrivalAt,
   sidewalkAt,
@@ -23,7 +26,7 @@ import { GameState, Player } from '../schema/game.state';
 const COLORS = ['#ef4444', '#f59e0b', '#22c55e', '#3b82f6', '#a855f7', '#ec4899', '#14b8a6', '#eab308'];
 const BODIES = Object.keys(HUMAN_BODIES) as HumanBody[];
 const MAX_STEPS_PER_TICK = 5; // after a stall, drop time rather than run a burst of steps
-const FALL_RESET_Y = -50; // anyone who somehow falls out of the world is put back on a street
+const FALL_RESET_Y = -100; // anyone who somehow falls out of the world (below the rooms under it) is put back on a street
 
 export class GameRoom extends Room<GameState> {
   maxClients = 16;
@@ -56,6 +59,26 @@ export class GameRoom extends Room<GameState> {
       entry.walker.body.setTranslation(to, true);
       entry.velocityY = 0;
       Object.assign(player, { x: to.x, y: to.y, z: to.z, heading: to.heading });
+    });
+
+    // E at a front door: into the room under the building, or back out to the street. Or home.
+    this.onMessage(Messages.Door, (client, message: DoorMessage) => {
+      const entry = this.walkers.get(client.sessionId);
+      const player = this.state.players.get(client.sessionId);
+      if (!entry || !player) return;
+      let to: { x: number; y: number; z: number; heading: number } | undefined;
+      if (message?.home) {
+        const home = this.city.interiors[this.city.home];
+        if (home) to = { x: home.door.x, y: KERB_HEIGHT + 0.05, z: home.door.z, heading: home.door.heading + Math.PI };
+      } else {
+        const door = interiorDoorAt(this.city.interiors, player.x, player.y, player.z, 2.6);
+        if (door?.inside) to = { x: door.interior.door.x, y: KERB_HEIGHT + 0.05, z: door.interior.door.z, heading: door.interior.door.heading };
+        else if (door) to = { ...door.interior.entry, y: door.interior.entry.y + 0.05 };
+      }
+      if (!to) return;
+      entry.walker.body.setTranslation(to, true);
+      entry.velocityY = 0;
+      Object.assign(player, to);
     });
 
     this.onMessage(Messages.Action, (client, message: ActionMessage) => {

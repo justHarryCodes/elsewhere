@@ -7,6 +7,8 @@ export * from './humans';
 export * from './scale';
 export * from './vehicles';
 export * from './city';
+export * from './traffic';
+export * from './interiors';
 
 export const ROOM_NAME = 'game';
 export const SERVER_PORT = 3000;
@@ -18,6 +20,7 @@ export const Messages = {
   Input: 'input',
   Action: 'action',
   Teleport: 'teleport',
+  Door: 'door',
 } as const;
 
 /** Movement direction on the ground plane, each axis in [-1, 1]. */
@@ -35,6 +38,11 @@ export interface ActionMessage {
 export interface TeleportMessage {
   x: number;
   z: number;
+}
+
+/** Through the door the player is standing at (into a building's room or back out), or `home` to go home. */
+export interface DoorMessage {
+  home?: boolean;
 }
 
 export interface JoinOptions {

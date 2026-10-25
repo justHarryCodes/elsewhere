@@ -64,6 +64,49 @@ PROP_HEIGHTS = {
     'bus-stop': 2.7, 'bus-stop-sign': 2.8, 'bench': 0.95, 'trash-can': 1.0, 'fire-hydrant': 0.8,
     'mailbox': 1.25, 'planter-bushes': 0.95, 'power-box': 1.4, 'flower-pot': 1.0, 'flower-pot-2': 1.0,
     'bike-warning-road-sign': 2.6, 'dumpster': 1.4, 'cone': 0.7, 'atm': 1.8, 'roof-exit': 2.6,
+    'bicycle': 1.05, 'trah-bag-grey': 0.55, 'manhole-cover': 0.05, 'washing-line': 2.1, 'fence-piece': 1.0,
+}
+
+# Service buildings (glb): real height in metres, and whether the front (entrance) faces +X as authored
+# (turned to face +Z like everything else).
+SERVICES = {'hospital': (os.path.join('buildings', 'city-pack', 'hospital.glb'), 14.0, True)}
+# Parked cars: real width in metres (they face +Z as authored).
+CARS = {
+    'police-car': (os.path.join('vehicles', 'singles', 'police-car.glb'), 1.95),
+    'ambulance': (os.path.join('vehicles', 'singles', 'ambulance.glb'), 2.2),
+    'taxi': (os.path.join('vehicles', 'singles', 'taxi.glb'), 1.85),
+    'suv': (os.path.join('vehicles', 'singles', 'suv.glb'), 1.95),
+    'hatchback': (os.path.join('buildings', 'city-pack', 'car.glb'), 1.8),
+    'sedan': (os.path.join('buildings', 'city-pack', 'car-2.glb'), 1.85),
+    'van': (os.path.join('buildings', 'city-pack', 'van.glb'), 2.0),
+}
+
+# Furniture for the interiors, centred on x = z = 0 with the front toward +Z. Kenney's furniture kit is
+# all in one scale (2.1 makes its doors 2.1 m); the rest are scaled to a real height.
+KENNEY_FURNITURE_SCALE = 2.1
+KENNEY_FURNITURE = [
+    'bedDouble', 'bedSingle', 'cabinetBedDrawerTable', 'loungeSofa', 'loungeSofaCorner', 'loungeChair', 'loungeDesignSofa',
+    'tableCoffee', 'tableCoffeeGlass', 'table', 'tableRound', 'tableCloth', 'chair', 'chairCushion', 'chairDesk',
+    'chairModernCushion', 'desk', 'deskCorner', 'bookcaseOpen', 'bookcaseClosedWide', 'bookcaseOpenLow', 'books',
+    'televisionModern', 'cabinetTelevision', 'rugRectangle', 'rugRound', 'rugRounded', 'rugDoormat', 'lampRoundFloor',
+    'lampSquareTable', 'lampRoundTable', 'pottedPlant', 'plantSmall1', 'plantSmall2', 'sideTable', 'coatRackStanding',
+    'kitchenFridgeLarge', 'kitchenCabinet', 'kitchenCabinetDrawer', 'kitchenCabinetUpper', 'kitchenStove', 'kitchenSink',
+    'kitchenBar', 'kitchenBarEnd', 'kitchenMicrowave', 'kitchenCoffeeMachine', 'stoolBar', 'toilet', 'bathtub', 'shower',
+    'bathroomCabinetDrawer', 'bathroomMirror', 'washer', 'dryer', 'computerScreen', 'computerKeyboard', 'laptop',
+    'speaker', 'radio', 'cardboardBoxClosed', 'cardboardBoxOpen', 'trashcan', 'lampSquareCeiling', 'pillow', 'bear',
+    'benchCushion', 'coatRack',
+]
+OTHER_FURNITURE = {
+    'file-cabinet': (os.path.join('furniture', 'office-pack', 'file-cabinet.glb'), 1.3),
+    'water-cooler': (os.path.join('furniture', 'office-pack', 'water-cooler.glb'), 1.3),
+    'vending-machine': (os.path.join('furniture', 'office-pack', 'vending-machine.glb'), 1.95),
+    'whiteboard': (os.path.join('furniture', 'office-pack', 'whiteboard.glb'), 1.9),
+    'printer': (os.path.join('furniture', 'office-pack', 'printer.glb'), 0.45),
+    'office-chair': (os.path.join('furniture', 'office-pack', 'office-chair.glb'), 1.1),
+    'wall-art': (os.path.join('furniture', 'office-pack', 'wall-art-03.glb'), 0.9),
+    'cash-register': (os.path.join('furniture', 'coffeehouse-lounge', 'cash-register.glb'), 0.35),
+    'can-fridge': (os.path.join('furniture', 'coffeehouse-lounge', 'can-fridge.glb'), 1.95),
+    'coffee-machine': (os.path.join('furniture', 'coffeehouse-lounge', 'coffee-machine.glb'), 0.5),
 }
 
 COMPONENTS = {'SCALAR': 1, 'VEC2': 2, 'VEC3': 3, 'VEC4': 4}
@@ -217,8 +260,8 @@ def main():
             saved.add(out)
         return out
 
-    def add_piece(name, groups, scale=1.0, ground=True):
-        """groups: material key -> Mesh. Scales, drops the base onto y = 0, writes it out."""
+    def add_piece(name, groups, scale=1.0, ground=True, centre=False):
+        """groups: material key -> Mesh. Scales, drops the base onto y = 0 (and centres it on x = z = 0), writes it out."""
         lo = [1e9] * 3
         hi = [-1e9] * 3
         for mesh in groups.values():
@@ -227,12 +270,13 @@ def main():
                     lo[a] = min(lo[a], mesh.p[k + a] * scale)
                     hi[a] = max(hi[a], mesh.p[k + a] * scale)
         lift = -lo[1] if ground else 0
-        entry = {'parts': {}, 'min': [round(lo[0], 3), 0 if ground else round(lo[1], 3), round(lo[2], 3)],
-                 'max': [round(hi[0], 3), round(hi[1] + lift, 3), round(hi[2], 3)]}
+        shift = [-(lo[0] + hi[0]) / 2 if centre else 0, lift, -(lo[2] + hi[2]) / 2 if centre else 0]
+        entry = {'parts': {}, 'min': [round(lo[0] + shift[0], 3), 0 if ground else round(lo[1], 3), round(lo[2] + shift[2], 3)],
+                 'max': [round(hi[0] + shift[0], 3), round(hi[1] + lift, 3), round(hi[2] + shift[2], 3)]}
         for key, mesh in groups.items():
             if not mesh.i:
                 continue
-            p = [v * scale + (lift if k % 3 == 1 else 0) for k, v in enumerate(mesh.p)]
+            p = [v * scale + shift[k % 3] for k, v in enumerate(mesh.p)]
             part = {'vertices': len(p) // 3, 'indices': len(mesh.i), 'p': put(p, 'f'), 'n': put(mesh.n, 'f'),
                     'uv': put(mesh.uv, 'f'), 'i': put(mesh.i, 'I')}
             if mesh.c:
@@ -266,9 +310,13 @@ def main():
         add_piece('ub/' + name, {key: merged}, ground=not name.startswith('Sign') and name != 'CasinoSign')
 
     # ---- glb models: textured materials keep their texture; flat colours go to vertex colours
-    def pack_glb(path, name, scale):
+    def pack_glb(path, name, scale, turn=False, centre=False):
         groups = {}
         for entry in read_glb(path):
+            if turn:  # front from +X to +Z: (x, z) -> (-z, x)
+                for arr in (entry['mesh'].p, entry['mesh'].n):
+                    for k in range(0, len(arr), 3):
+                        arr[k], arr[k + 2] = -arr[k + 2], arr[k]
             mat = entry['material']
             pbr = mat.get('pbrMetallicRoughness', {})
             colour = pbr.get('baseColorFactor', [1, 1, 1, 1])
@@ -295,7 +343,7 @@ def main():
                 mesh.uv += src.uv
                 mesh.c += colour[:3] * (len(src.p) // 3)
                 mesh.i += [base + t for t in src.i]
-        add_piece(name, groups, scale)
+        add_piece(name, groups, scale, centre=centre)
 
     materials['town-vcolor'] = {'base': None, 'color': [1, 1, 1, 1], 'vertexColors': True}
     for name, scale in NATURE_SCALES.items():
@@ -308,6 +356,27 @@ def main():
             ys = entry['mesh'].p[1::3]
             lo, hi = min(lo, min(ys)), max(hi, max(ys))
         pack_glb(path, 'prop/' + name, height / (hi - lo))
+
+    def extent(path, axis):
+        lo, hi = 1e9, -1e9
+        for entry in read_glb(path):
+            values = entry['mesh'].p[axis::3]
+            lo, hi = min(lo, min(values)), max(hi, max(values))
+        return hi - lo
+
+    for name, (rel, height, turn) in SERVICES.items():
+        path = os.path.join(ASSETS, rel)
+        pack_glb(path, 'service/' + name, height / extent(path, 1), turn)
+    for name, (rel, width) in CARS.items():
+        path = os.path.join(ASSETS, rel)
+        pack_glb(path, 'car/' + name, width / extent(path, 0))
+
+    for name in KENNEY_FURNITURE:
+        pack_glb(os.path.join(ASSETS, 'furniture', 'kenney-furniture-kit', name + '.glb'), 'furniture/' + name,
+                 KENNEY_FURNITURE_SCALE, centre=True)
+    for name, (rel, height) in OTHER_FURNITURE.items():
+        path = os.path.join(ASSETS, rel)
+        pack_glb(path, 'furniture/' + name, height / extent(path, 1), centre=True)
 
     # A tileable lawn: soft green noise in two scales.
     import random

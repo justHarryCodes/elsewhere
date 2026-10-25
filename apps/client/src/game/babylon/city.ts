@@ -23,6 +23,7 @@ import {
   type CityNeon,
   type CityPiece,
   type CityShape,
+  type CitySign,
 } from '@game/shared';
 import { type Batch, MegaKit, ROOM_MATERIALS, ROOM_TEXTURES } from '../megakit';
 
@@ -51,7 +52,7 @@ const ROOM_GLOW: Record<string, Color3> = {
 
 
 /** What a city mesh is, for callers that treat them differently (e.g. only neon in a glow layer). */
-export type CityMeshKind = 'ground' | 'building' | 'neon' | 'lamp' | 'pool';
+export type CityMeshKind = 'ground' | 'building' | 'interior' | 'neon' | 'lamp' | 'pool';
 
 interface Chunk {
   key: string;
@@ -60,6 +61,9 @@ interface Chunk {
   z0: number;
   pieces: CityPiece[];
   shapes: CityShape[];
+  signs: CitySign[];
+  /** The rooms under this chunk's buildings: drawn apart, out of the sun's shadows. */
+  rooms: { pieces: CityPiece[]; shapes: CityShape[] };
   neon: Map<number, CityNeon[]>;
   lights: Map<number, CityLight[]>;
   state: 'empty' | 'loading' | 'rising' | 'built' | 'sinking';
@@ -80,8 +84,8 @@ export interface CityRendererOptions {
  * update() every frame. A chunk's streets, buildings and props are welded into one mesh per material
  * (a dozen draw calls), so it costs the same however many pieces it took to build.
  *
- * Neon (shop-front tubes, blade signs, billboards, tower outlines) glows day and night. At night
- * (setNight) the lit rooms behind the windows glow, and street lamps throw pools of coloured light.
+ * By day the town is plain daylight. At night (setNight) the neon comes on (shop-front tubes, blade signs,
+ * billboards, tower outlines), the lit rooms behind the windows glow, and street lamps throw pools of light.
  */
 export class CityRenderer {
   readonly root: TransformNode;
@@ -92,13 +96,16 @@ export class CityRenderer {
   private readonly kitLoading: Promise<MegaKit>;
   private disposed = false;
   private night = false;
-  /** Lamp heads and light pools: drawn only at night. */
+  /** Neon, lamp heads and light pools: drawn only at night. */
   private readonly nightOnly = new Set<Mesh>();
+  /** Meshes of the rooms under the buildings (they don't rise and sink with the street). */
+  private readonly rooms = new Set<Mesh>();
   private readonly materials = new Map<string, PBRMaterial>();
   private readonly textures = new Map<string, Texture>();
   private readonly neonMaterials: StandardMaterial[];
   private readonly poolMaterials: StandardMaterial[];
   private readonly shapeMaterials = new Map<string, PBRMaterial>();
+  private readonly signMaterials = new Map<string, StandardMaterial>();
 
   private constructor(
     private readonly scene: Scene,
@@ -130,7 +137,7 @@ export class CityRenderer {
       material.diffuseColor = Color3.Black();
       material.emissiveTexture = spot;
       material.opacityTexture = spot;
-      material.emissiveColor = Color3.FromHexString(hex).scale(0.18); // faint, so it tints rather than whitens
+      material.emissiveColor = Color3.FromHexString(hex).scale(0.3); // soft, so it tints rather than whitens
       material.alphaMode = Constants.ALPHA_ADD;
       material.disableDepthWrite = true;
       material.freeze();
@@ -148,7 +155,7 @@ export class CityRenderer {
       const key = `${cx},${cz}`;
       let chunk = chunks.get(key);
       if (!chunk) {
-        chunk = { key, x0: cx * CHUNK, z0: cz * CHUNK, pieces: [], shapes: [], neon: new Map(), lights: new Map(), state: 'empty', meshes: [], t: 0 };
+        chunk = { key, x0: cx * CHUNK, z0: cz * CHUNK, pieces: [], shapes: [], signs: [], rooms: { pieces: [], shapes: [] }, neon: new Map(), lights: new Map(), state: 'empty', meshes: [], t: 0 };
         chunks.set(key, chunk);
       }
       return chunk;
@@ -163,6 +170,12 @@ export class CityRenderer {
     // A building goes with the chunk its middle is in.
     for (const b of city.buildings) chunkAt((b.x0 + b.x1) / 2, (b.z0 + b.z1) / 2).pieces.push(...b.pieces);
     for (const s of city.shapes) chunkAt(s.x, s.z).shapes.push(s);
+    for (const s of city.signs) chunkAt(s.x, s.z).signs.push(s);
+    for (const room of city.interiors) {
+      const rooms = chunkAt(room.x, room.z).rooms;
+      rooms.pieces.push(...room.pieces);
+      rooms.shapes.push(...room.shapes);
+    }
     for (const n of city.neon) addTo(chunkAt(n.x, n.z).neon, n.color, n);
     for (const l of city.lights) addTo(chunkAt(l.x, l.z).lights, l.color, l);
     renderer.chunks.push(...chunks.values());
@@ -172,7 +185,7 @@ export class CityRenderer {
     return renderer;
   }
 
-  /** Night: lit windows, glowing lamps and pools of light under them. Neon is on either way. */
+  /** Night: neon, lit windows, glowing lamps and pools of light under them. */
   setNight(night: boolean) {
     this.night = night;
     for (const mesh of this.nightOnly) mesh.setEnabled(night);
@@ -238,7 +251,7 @@ export class CityRenderer {
     // The mesh's own scale applies after its vertices are placed, so scaling Y squashes the whole
     // chunk down onto the ground (y = 0): it grows up out of the street, or sinks into it.
     const k = chunk.t * chunk.t * (3 - 2 * chunk.t);
-    for (const mesh of chunk.meshes) mesh.scaling.y = Math.max(k, 0.001);
+    for (const mesh of chunk.meshes) if (!this.rooms.has(mesh)) mesh.scaling.y = Math.max(k, 0.001);
   }
 
   private build(chunk: Chunk, kit: MegaKit) {
@@ -247,26 +260,19 @@ export class CityRenderer {
       this.addToChunk(chunk, this.batchMesh(`city-${key}-${chunk.key}`, batch, this.material(kit, key)), 'building');
     }
     // Tanks, chimneys, containers and lamp posts: one batch per shape and colour.
-    const shapes = new Map<string, CityShape[]>();
-    for (const s of chunk.shapes) {
-      const key = `${s.kind}|${s.color}`;
-      const list = shapes.get(key);
-      if (list) list.push(s);
-      else shapes.set(key, [s]);
+    this.addShapes(chunk, chunk.shapes, 'building');
+    // Rooms: their furniture and walls, apart from the street so the buildings' shadows stay out.
+    for (const [key, batch] of kit.weld(chunk.rooms.pieces)) {
+      this.addToChunk(chunk, this.batchMesh(`city-room-${key}-${chunk.key}`, batch, this.material(kit, key)), 'interior');
     }
-    for (const [key, list] of shapes) {
-      const [kind, color] = key.split('|');
-      const mesh =
-        kind === 'box'
-          ? MeshBuilder.CreateBox(`city-shape-${key}-${chunk.key}`, { size: 1 }, this.scene)
-          : MeshBuilder.CreateCylinder(`city-shape-${key}-${chunk.key}`, { diameter: 1, height: 1, tessellation: 20 }, this.scene);
-      mesh.material = this.shapeMaterial(color);
-      // Unit shapes centred on the origin: lift by half their height so y is their base.
-      this.setInstances(
-        mesh,
-        list.map((s) => ({ x: s.x, y: s.y + s.h / 2, z: s.z, sx: s.w, sy: s.h, sz: s.d, yaw: s.yaw })),
-      );
-      this.addToChunk(chunk, mesh, 'building');
+    this.addShapes(chunk, chunk.rooms.shapes, 'interior');
+    // Name boards of the public buildings.
+    for (const sign of chunk.signs) {
+      const board = MeshBuilder.CreatePlane(`city-sign-${sign.text}`, { width: sign.w, height: sign.h, sideOrientation: Mesh.DOUBLESIDE }, this.scene);
+      board.material = this.signMaterial(sign);
+      board.position.set(sign.x, sign.y, sign.z);
+      board.rotation.y = sign.yaw; // in this right-handed scene the plane's face looks along +Z
+      this.addToChunk(chunk, board, 'building');
     }
     // Neon tubes and signs, and at night the lamp heads, one batch per colour.
     for (const [color, boxes] of chunk.neon) {
@@ -287,6 +293,32 @@ export class CityRenderer {
     }
     chunk.t = 0;
     chunk.state = 'rising';
+  }
+
+  /** Code-made boxes and cylinders: one batch per shape and colour. */
+  private addShapes(chunk: Chunk, list: CityShape[], kind: CityMeshKind) {
+    const groups = new Map<string, CityShape[]>();
+    for (const s of list) {
+      const key = `${s.kind}|${s.color}`;
+      const group = groups.get(key);
+      if (group) group.push(s);
+      else groups.set(key, [s]);
+    }
+    for (const [key, group] of groups) {
+      const [shape, color] = key.split('|');
+      const name = `city-${kind}-${key}-${chunk.key}`;
+      const mesh =
+        shape === 'box'
+          ? MeshBuilder.CreateBox(name, { size: 1 }, this.scene)
+          : MeshBuilder.CreateCylinder(name, { diameter: 1, height: 1, tessellation: 20 }, this.scene);
+      mesh.material = this.shapeMaterial(color);
+      // Unit shapes centred on the origin: lift by half their height so y is their base.
+      this.setInstances(
+        mesh,
+        group.map((s) => ({ x: s.x, y: s.y + s.h / 2, z: s.z, sx: s.w, sy: s.h, sz: s.d, yaw: s.yaw })),
+      );
+      this.addToChunk(chunk, mesh, kind);
+    }
   }
 
   private batchMesh(name: string, batch: Batch, material: PBRMaterial): Mesh {
@@ -318,9 +350,15 @@ export class CityRenderer {
   private addToChunk(chunk: Chunk, mesh: Mesh, kind: CityMeshKind) {
     mesh.parent = this.root;
     mesh.isPickable = false;
-    mesh.scaling.y = 0.001;
+    // Rooms are far underground: squashing them onto the street would flash them up there.
+    if (kind === 'interior') {
+      this.rooms.add(mesh);
+      mesh.onDisposeObservable.addOnce(() => this.rooms.delete(mesh));
+    } else {
+      mesh.scaling.y = 0.001;
+    }
     if (kind === 'building') mesh.receiveShadows = true;
-    if (kind === 'lamp' || kind === 'pool') {
+    if (kind === 'neon' || kind === 'lamp' || kind === 'pool') {
       this.nightOnly.add(mesh);
       mesh.setEnabled(this.night);
       mesh.onDisposeObservable.addOnce(() => this.nightOnly.delete(mesh));
@@ -331,6 +369,34 @@ export class CityRenderer {
   }
 
   // ------------------------------------------------------------------ materials
+
+  /** A sign's lettering, painted once per sign. */
+  private signMaterial(sign: CitySign): StandardMaterial {
+    const key = `${sign.text}|${sign.background}|${sign.color}`;
+    let material = this.signMaterials.get(key);
+    if (!material) {
+      const height = 128;
+      const width = Math.round((height * sign.w) / sign.h);
+      const texture = new DynamicTexture(`city-sign-${sign.text}`, { width, height }, this.scene, true);
+      const ctx = texture.getContext() as CanvasRenderingContext2D;
+      ctx.fillStyle = sign.background;
+      ctx.fillRect(0, 0, width, height);
+      ctx.fillStyle = sign.color;
+      ctx.font = `bold ${Math.round(height * 0.56)}px Arial, sans-serif`;
+      ctx.textAlign = 'center';
+      ctx.textBaseline = 'middle';
+      ctx.fillText(sign.text, width / 2, height * 0.54, width * 0.92);
+      texture.update();
+      material = new StandardMaterial(`city-sign-${sign.text}`, this.scene);
+      material.diffuseTexture = texture;
+      material.emissiveTexture = texture;
+      material.emissiveColor = new Color3(0.35, 0.35, 0.35); // readable in shade and lit up at night
+      material.specularColor = Color3.Black();
+      material.freeze();
+      this.signMaterials.set(key, material);
+    }
+    return material;
+  }
 
   /** A texture by URL, made once. `pixel`: a tiny palette, sampled without blurring between cells. */
   private texture(url: string, pixel = false): Texture {

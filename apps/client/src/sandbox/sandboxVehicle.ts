@@ -1,4 +1,4 @@
-import type { Collider } from '@dimforge/rapier3d-compat';
+import type { Collider, RigidBody } from '@dimforge/rapier3d-compat';
 import {
   Color3,
   InstancedMesh,
@@ -42,12 +42,15 @@ import {
   setSiren,
   stepAll,
   vehicleSnapshot,
+  KIND_GROUPS,
 } from '@game/shared/physics';
 import { VehicleLibrary, type VehicleVisual } from '../game/babylon/vehicles';
 
 const CAR = 'car';
 const MAX_STEPS_PER_FRAME = 5; // never spiral: drop time rather than run 10 steps after a stall
 const CRATE = { x: 12, z: 18, size: 1 };
+/** A traffic car's solid box: centre height and half sizes, metres. */
+const TRAFFIC_BOX = { y: 0.85, hx: 0.95, hy: 0.65, hz: 2.25 };
 
 export interface StaticBlock {
   x: number;
@@ -90,6 +93,7 @@ export class SandboxVehicle {
   private siren = false;
   private loading?: Promise<void>;
   private readonly crates: { id: string; mesh: Mesh }[] = [];
+  private readonly traffic = new Map<number, RigidBody>();
 
   private constructor(
     private readonly scene: Scene,
@@ -215,6 +219,39 @@ export class SandboxVehicle {
     const localX = dx * Math.cos(yaw) - dz * Math.sin(yaw);
     const localZ = dx * Math.sin(yaw) + dz * Math.cos(yaw);
     return Math.hypot(Math.max(0, Math.abs(localX) - this.halfWidth), Math.max(0, Math.abs(localZ) - this.halfLength));
+  }
+
+  /** Where the car is on the ground. */
+  get position(): { x: number; z: number } | undefined {
+    return this.snapshot && { x: this.snapshot.x, z: this.snapshot.z };
+  }
+
+  /**
+   * Solid stand-ins for the town's traffic: a kinematic box per car, moved where the car is drawn, so
+   * the character and the player's car bump into them.
+   */
+  syncTraffic(cars: readonly { id: number; x: number; z: number; heading: number }[]) {
+    const { RAPIER, world } = this.sim;
+    const seen = new Set<number>();
+    for (const car of cars) {
+      seen.add(car.id);
+      const h = car.heading / 2;
+      const rotation = { x: 0, y: Math.sin(h), z: 0, w: Math.cos(h) };
+      const at = { x: car.x, y: TRAFFIC_BOX.y, z: car.z };
+      let body = this.traffic.get(car.id);
+      if (!body) {
+        body = world.createRigidBody(RAPIER.RigidBodyDesc.kinematicPositionBased().setTranslation(at.x, at.y, at.z).setRotation(rotation));
+        world.createCollider(RAPIER.ColliderDesc.cuboid(TRAFFIC_BOX.hx, TRAFFIC_BOX.hy, TRAFFIC_BOX.hz).setCollisionGroups(KIND_GROUPS.static), body);
+        this.traffic.set(car.id, body);
+      }
+      body.setNextKinematicTranslation(at);
+      body.setNextKinematicRotation(rotation);
+    }
+    for (const [id, body] of this.traffic) {
+      if (seen.has(id)) continue;
+      world.removeRigidBody(body);
+      this.traffic.delete(id);
+    }
   }
 
   /** Heading around Y, radians, 0 faces +Z (like players). */
