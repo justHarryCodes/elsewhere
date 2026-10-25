@@ -4,15 +4,16 @@ import { OrbitControls } from "three/addons/controls/OrbitControls.js";
 import { WORLD_HALF_SIZE, toHumanAnimation, toHumanBody } from "@game/shared";
 import type { PlayersRef } from "../../net/useGameRoom";
 import { approachAngle, smoothing } from "../smoothing";
+import {
+  CAMERA_DISTANCE,
+  CAMERA_MAX_DISTANCE,
+  CAMERA_MIN_DISTANCE,
+  CAMERA_POLAR,
+  CAMERA_TARGET_HEIGHT,
+} from "../camera";
 import { type HumanCharacter, HumanLibrary } from "./humans";
 
-// Camera tuning
 const CAMERA_AZIMUTH = 0; // horizontal angle (0 = behind the player, on the +Z side looking toward -Z)
-const CAMERA_POLAR = Math.PI / 4; // angle from straight up: PI/4 = 45° overhead
-const CAMERA_DISTANCE = 20; // distance from the player: bigger = more zoomed out
-const CAMERA_MIN_DISTANCE = 10; // closest the mouse wheel can zoom
-const CAMERA_MAX_DISTANCE = 35; // farthest the mouse wheel can zoom
-const CAMERA_TARGET_HEIGHT = 1; // aim at chest height instead of the feet (set 0 for feet)
 
 export function ThreeScene({
   players,
