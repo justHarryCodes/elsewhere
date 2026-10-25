@@ -4,12 +4,16 @@ import {
   Color3,
   LoadAssetContainerAsync,
   type Material,
+  Mesh,
   MultiMaterial,
   type Node,
   PBRMaterial,
   Quaternion,
   type Scene,
+  SpotLight,
   TransformNode,
+  Vector3,
+  VertexData,
 } from '@babylonjs/core';
 import '@babylonjs/loaders/glTF';
 import {
@@ -33,11 +37,18 @@ const TAIL_RUNNING = 0.35; // tail lights glow dimly whenever the headlights are
 const TAIL_BRAKE = 2.2;
 const REVERSE = new Color3(1, 0.9, 0.88);
 const REVERSE_STRENGTH = 1.6;
-const SIREN_A = new Color3(0.02, 0.1, 1);
-const SIREN_B = new Color3(1, 1, 1);
-const SIREN_STRENGTH = 1.8;
+const SIREN_STRENGTH = 1.8; // siren lamps glow in their own colour (red, blue, white)
 const SIREN_PERIOD = 0.6; // seconds for one blue-white cycle
-const GLASS_ALPHA = 0.55; // shows the driver; more see-through exposes models with no interior
+// Tinted glass: dark and mostly opaque, with sky reflections; the driver shows as a shape inside.
+const GLASS_ALPHA = 0.72;
+const GLASS_TINT = new Color3(0.02, 0.025, 0.03);
+
+// Real headlight beams (only for the car the player drives; each light costs every lit material).
+const BEAM_COLOUR = new Color3(1, 0.95, 0.85);
+const BEAMS = {
+  low: { intensity: 3, range: 45, angle: 1.0, pitch: -0.12 },
+  high: { intensity: 6, range: 110, angle: 0.65, pitch: -0.03 },
+};
 
 /**
  * Car paint is a base coat under a clear coat. Metallic flake makes the base reflect like metal;
@@ -111,6 +122,7 @@ export class VehicleVisual {
   private paintHex = '';
   private finish?: PaintFinish;
   private readonly originalPaint = new Map<PBRMaterial, Color3>();
+  private beams: SpotLight[] = [];
   private time = 0;
 
   constructor(
@@ -162,12 +174,25 @@ export class VehicleVisual {
     for (const [role, names] of Object.entries(def.materials) as [MaterialRole, readonly string[]][]) {
       this.roles.set(role, names.flatMap((n) => byName.get(n) ?? []));
     }
+    for (const split of def.splits ?? []) {
+      const above = (split.above + offset.y) * scale; // vehicle space; the root is still at the origin
+      for (const material of byName.get(split.material) ?? []) {
+        const meshes = this.root.getChildMeshes(false).filter((m): m is Mesh => m instanceof Mesh && m.material === material);
+        for (const mesh of meshes) {
+          const top = splitAbove(mesh, above, `${name}-${split.material}-${split.role}`);
+          if (top) this.roles.set(split.role, [...this.materials(split.role), top.material as PBRMaterial]);
+        }
+      }
+    }
     for (const material of this.materials('paint')) this.originalPaint.set(material, material.albedoColor.clone());
     // Unlit lamps keep their authored colour; lit ones add emissive on top.
     for (const role of ['headlight', 'taillight', 'reverse', 'sirenA', 'sirenB'] as const) {
       for (const material of this.materials(role)) material.emissiveColor = Color3.Black();
     }
     for (const material of this.materials('glass')) {
+      material.albedoColor = GLASS_TINT.clone();
+      material.metallic = 0;
+      material.roughness = 0.05;
       material.alpha = GLASS_ALPHA;
       material.transparencyMode = PBRMaterial.MATERIAL_ALPHABLEND;
       material.backFaceCulling = false;
@@ -218,7 +243,28 @@ export class VehicleVisual {
     }
   }
 
+  /**
+   * Gives this car real headlight beams that light the road (for the player's car). Two spot lights
+   * sit at the front corners, at headlight height, and follow the headlight switch.
+   */
+  enableBeams() {
+    if (this.beams.length) return;
+    const { halfLength, halfWidth, bodyTop } = this.geometry;
+    const scene = this.root.getScene();
+    for (const side of [1, -1]) {
+      const beam = new SpotLight(`${this.root.name}-beam`, Vector3.Zero(), new Vector3(0, 0, 1), 1, 2, scene);
+      beam.parent = this.root;
+      beam.position.set(side * halfWidth * 0.65, Math.max(0.55, bodyTop * 0.45), halfLength - 0.05);
+      beam.diffuse = BEAM_COLOUR;
+      beam.specular = BEAM_COLOUR;
+      beam.intensity = 0;
+      beam.setEnabled(false);
+      this.beams.push(beam);
+    }
+  }
+
   dispose() {
+    for (const beam of this.beams) beam.dispose();
     for (const material of uniqueMaterials(this.meshes)) material.dispose();
     this.root.dispose(false, true);
   }
@@ -231,6 +277,15 @@ export class VehicleVisual {
     const has = (flag: number) => (lights & flag) !== 0;
     const head = has(VehicleLights.High) ? HEADLIGHT_HIGH : has(VehicleLights.Low) ? HEADLIGHT_LOW : 0;
     glow(this.materials('headlight'), HEADLIGHT, head);
+    const beam = has(VehicleLights.High) ? BEAMS.high : has(VehicleLights.Low) ? BEAMS.low : undefined;
+    for (const light of this.beams) {
+      light.setEnabled(!!beam);
+      if (!beam) continue;
+      light.intensity = beam.intensity;
+      light.range = beam.range;
+      light.angle = beam.angle;
+      light.direction.set(0, beam.pitch, 1);
+    }
 
     const reversing = has(VehicleLights.Reverse);
     const reverseLamps = this.materials('reverse');
@@ -248,8 +303,8 @@ export class VehicleVisual {
     const siren = has(VehicleLights.Siren);
     const phase = (this.time % SIREN_PERIOD) / SIREN_PERIOD;
     const flash = (from: number) => phase >= from && phase < from + 0.5 && (phase - from) % 0.25 < 0.17;
-    glow(this.materials('sirenA'), SIREN_A, siren && flash(0) ? SIREN_STRENGTH : 0);
-    glow(this.materials('sirenB'), SIREN_B, siren && flash(0.5) ? SIREN_STRENGTH : 0);
+    for (const material of this.materials('sirenA')) glow([material], lampColour(material), siren && flash(0) ? SIREN_STRENGTH : 0);
+    for (const material of this.materials('sirenB')) glow([material], lampColour(material), siren && flash(0.5) ? SIREN_STRENGTH : 0);
   }
 }
 
@@ -264,6 +319,45 @@ function uniqueMaterials(meshes: AbstractMesh[]): Material[] {
     }
   }
   return [...found];
+}
+
+/**
+ * Moves the triangles of `mesh` that lie entirely above `y` (world space) into a new mesh with its own
+ * copy of the material, so part of a shared material (e.g. a light bar using the tail-light colour)
+ * can light up on its own.
+ */
+function splitAbove(mesh: Mesh, y: number, name: string): Mesh | undefined {
+  mesh.computeWorldMatrix(true);
+  const positions = mesh.getVerticesData('position');
+  const indices = mesh.getIndices();
+  if (!positions || !indices) return undefined;
+  const world = mesh.getWorldMatrix();
+  const vertexY = (i: number) => Vector3.TransformCoordinates(new Vector3(positions[i * 3], positions[i * 3 + 1], positions[i * 3 + 2]), world).y;
+  const above: number[] = [];
+  const below: number[] = [];
+  for (let t = 0; t < indices.length; t += 3) {
+    const tri = [indices[t], indices[t + 1], indices[t + 2]];
+    (tri.every((i) => vertexY(i) > y) ? above : below).push(...tri);
+  }
+  if (!above.length) return undefined;
+  mesh.makeGeometryUnique(); // the instance shares geometry with the loaded model
+  const top = new Mesh(name, mesh.getScene(), mesh.parent);
+  VertexData.ExtractFromMesh(mesh).applyToMesh(top);
+  top.setIndices(above);
+  mesh.setIndices(below);
+  top.position.copyFrom(mesh.position);
+  top.rotationQuaternion = mesh.rotationQuaternion?.clone() ?? null;
+  top.rotation.copyFrom(mesh.rotation);
+  top.scaling.copyFrom(mesh.scaling);
+  top.material = (mesh.material as PBRMaterial).clone(name);
+  return top;
+}
+
+/** A lamp's own hue at full brightness: red stays red, blue stays blue. */
+function lampColour(material: PBRMaterial): Color3 {
+  const c = material.albedoColor;
+  const max = Math.max(c.r, c.g, c.b, 1e-3);
+  return new Color3(c.r / max, c.g / max, c.b / max);
 }
 
 function glow(materials: PBRMaterial[], colour: Color3, strength: number) {

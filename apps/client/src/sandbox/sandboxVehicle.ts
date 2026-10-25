@@ -11,6 +11,7 @@ import {
 } from '@babylonjs/core';
 import {
   VehicleLights,
+  lerpVehicleSnapshot,
   vehicleFeatures,
   vehicleGeometry,
   type HeadlightMode,
@@ -70,6 +71,7 @@ export class SandboxVehicle {
   readonly input: VehicleInput = { throttle: 0, steer: 0, handbrake: false };
   private visual?: VehicleVisual;
   private snapshot?: VehicleSnapshot;
+  private previous?: VehicleSnapshot;
   private accumulator = 0;
   private model: VehicleModelKey = 'policeCar';
   private paint = '';
@@ -118,11 +120,17 @@ export class SandboxVehicle {
     while (this.accumulator >= RULES.DT) {
       const car = this.sim.bodies.get(CAR)?.vehicle;
       if (car) car.input = this.input;
+      this.previous = this.snapshot;
       stepAll(this.sim);
+      this.snapshot = vehicleSnapshot(this.sim, CAR) ?? undefined;
       this.accumulator -= RULES.DT;
     }
-    this.snapshot = vehicleSnapshot(this.sim, CAR) ?? undefined;
-    if (this.snapshot) this.visual?.apply(this.snapshot, dt);
+    // Physics moves in 1/60 s steps while the screen refreshes on its own clock; draw the pose part
+    // way between the last two steps so motion is smooth instead of stepping.
+    if (this.snapshot) {
+      const drawn = this.previous ? lerpVehicleSnapshot(this.previous, this.snapshot, this.accumulator / RULES.DT) : this.snapshot;
+      this.visual?.apply(drawn, dt);
+    }
 
     for (const { id, mesh } of this.crates) {
       const body = this.sim.bodies.get(id)?.body;
@@ -156,6 +164,11 @@ export class SandboxVehicle {
   /** Driver's seat (hips), in the car's own frame: +Z forward, +X left, y up from the ground. */
   get seat() {
     return vehicleGeometry(this.model).seat;
+  }
+
+  /** Roof line above the ground (top of the windows), metres. */
+  get roofTop() {
+    return vehicleGeometry(this.model).roofTop;
   }
 
   /** Whether the driver should be drawn: through glass, or astride a bike. */
@@ -252,11 +265,13 @@ export class SandboxVehicle {
       indexColliders(this.sim);
       this.visual?.dispose();
       this.visual = visual;
+      visual.enableBeams(); // the player's car lights the road
       for (const mesh of visual.meshes) {
         this.shadows.addShadowCaster(mesh);
         if (!(mesh instanceof InstancedMesh)) mesh.receiveShadows = true; // instances follow their source
       }
       this.snapshot = vehicleSnapshot(this.sim, CAR) ?? undefined;
+      this.previous = undefined;
       if (this.snapshot) visual.apply(this.snapshot, 0);
     };
     // Serialise spawns so quick model clicks can't leave two cars behind.

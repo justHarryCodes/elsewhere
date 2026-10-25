@@ -130,11 +130,10 @@ export const VEHICLE = {
   suspensionCompression: 2.4, // damping while the spring compresses
   suspensionRelaxation: 3.2, // damping while it extends
   suspensionTravel: 0.18, // metres of travel either side of rest
-  // Base friction slip (Rapier's max tyre impulse per unit of wheel load, roughly the tyre's mu),
-  // multiplied by model grip and the ground's friction. ~1.3 g for an ordinary road car.
-  tireFriction: 1.3,
-  escGain: 6, // stability control: share of excess yaw rate removed per second
-  escMinSpeed: 2, // m/s; below this the car is manoeuvring and ESC stays out of the way
+  // Base friction slip (Rapier's max tyre impulse per unit of wheel load), multiplied by model grip
+  // and the ground's friction. 4 is grippier than a real tyre (~1); it gives the planted, responsive
+  // handling of the first version. With the centre of mass at a real height it doesn't roll or spin.
+  tireFriction: 4,
   handbrakeRearGrip: 0.35, // rear grip fraction while the handbrake is on
   brakeFrontBias: 0.65, // share of braking on the front axle; even braking locks the rear and spins the car
   rollingResistance: 0.015, // coasting drag as a fraction of weight

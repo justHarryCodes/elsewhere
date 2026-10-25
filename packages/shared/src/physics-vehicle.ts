@@ -280,24 +280,6 @@ export function stepVehicles(sim: Sim): void {
 
     cc.updateVehicle(dt, RAPIER.QueryFilterFlags.EXCLUDE_SENSORS, rayGroups);
 
-    // ---- stability control (ESC, as in modern cars): don't let the car yaw faster than its steering
-    // and tyres allow, so braking or lifting mid-corner doesn't spin it. Off with the handbrake.
-    if (!inp.handbrake && Math.abs(speed) > C.VEHICLE.escMinSpeed) {
-      const up = rotate(e.body.rotation(), { x: 0, y: 1, z: 0 });
-      const w = e.body.angvel();
-      const yawRate = w.x * up.x + w.y * up.y + w.z * up.z;
-      const geo = v.geometry;
-      const wheelbase = geo.wheels[0].z - geo.wheels[2].z;
-      const kinematic = (speed * Math.tan(wheelYaw)) / wheelbase; // + = turning left
-      const limit = (h.grip * C.VEHICLE.tireFriction * g) / Math.abs(speed); // yaw rate the tyres can hold
-      const error = yawRate - clamp(kinematic, -limit, limit);
-      const L = geo.halfLength * 2;
-      const W = geo.halfWidth * 2;
-      const inertia = (v.mass / 12) * (L * L + W * W);
-      const k = -error * inertia * Math.min(1, C.VEHICLE.escGain * dt);
-      e.body.applyTorqueImpulse({ x: up.x * k, y: up.y * k, z: up.z * k }, true);
-    }
-
     // ---- data for rendering the wheels on the client
     for (let i = 0; i < 4; i++) {
       const w = v.wheels[i];

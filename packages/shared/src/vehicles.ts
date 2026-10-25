@@ -44,9 +44,13 @@ export interface VehicleCatalogEntry {
   /** Degrees the model is turned about +Y so it faces +Z. */
   yaw: number;
   body: ModelBounds;
+  /** Height of the roof line (top of the windows), model units. */
+  roof: number;
   /** Empty when the model's wheels are not separate parts (they can't spin or steer). */
   wheels: readonly CatalogWheel[];
   materials: Partial<Record<MaterialRole, readonly string[]>>;
+  /** Faces of `material` higher than `above` (model units) are given their own material in `role`. */
+  splits?: readonly { material: string; above: number; role: MaterialRole }[];
 }
 
 /** Handling, in real units. Mass comes from the size catalog (MASS_KG). */
@@ -86,7 +90,7 @@ export const HANDLING = {
   compact: { ...ROAD, accel: 3, topSpeed: 45, maxSteerDeg: 38 },
   sedan: ROAD,
   police: { ...ROAD, drive: "rwd", accel: 4.5, topSpeed: 58, grip: 1.1 },
-  sports: { ...ROAD, drive: "rwd", accel: 6, brakeDecel: 9.5, topSpeed: 70, minSteerDeg: 6, grip: 1.2 },
+  sports: { ...ROAD, drive: "rwd", accel: 7, brakeDecel: 10, topSpeed: 75, minSteerDeg: 6, grip: 1.3 },
   supercar: { ...ROAD, drive: "awd", accel: 8, brakeDecel: 10.5, topSpeed: 90, minSteerDeg: 5, grip: 1.35 },
   suv: { ...ROAD, drive: "awd", accel: 3.2, brakeDecel: 8, maxSteerDeg: 32 },
   pickup: { ...ROAD, drive: "rwd", accel: 3, brakeDecel: 7.5, topSpeed: 45, maxSteerDeg: 32 },
@@ -153,6 +157,8 @@ export interface VehicleGeometry {
   /** Physics chassis box, vertically. The bottom never dips below the wheel centres. */
   bodyBottom: number;
   bodyTop: number;
+  /** Roof line above the ground (top of the windows); a light bar or rack can sit above it. */
+  roofTop: number;
   wheelRadius: number;
   wheelWidth: number;
   /** Physics wheels. Order: front-left, front-right, rear-left, rear-right. */
@@ -253,6 +259,7 @@ export function vehicleGeometry(key: VehicleModelKey): VehicleGeometry {
     halfWidth,
     bodyBottom: Math.max(toY(body.min[1]), physics[0].y),
     bodyTop: toY(body.max[1]),
+    roofTop: toY(model.roof),
     wheelRadius,
     wheelWidth,
     wheels: physics,
@@ -304,4 +311,46 @@ export interface VehicleSnapshot {
   wheelDrop: [number, number, number, number];
   /** VehicleLights bitmask. */
   lights: number;
+}
+
+/**
+ * Blends two snapshots, e.g. the last two physics steps by how far the frame is into the next one.
+ * Physics runs at a fixed rate; drawing the in-between pose keeps motion smooth at any frame rate.
+ */
+export function lerpVehicleSnapshot(a: VehicleSnapshot, b: VehicleSnapshot, t: number): VehicleSnapshot {
+  const mix = (x: number, y: number) => x + (y - x) * t;
+  // Quaternion slerp (shortest way round).
+  let { qx: bx, qy: by, qz: bz, qw: bw } = b;
+  let dot = a.qx * bx + a.qy * by + a.qz * bz + a.qw * bw;
+  if (dot < 0) {
+    bx = -bx;
+    by = -by;
+    bz = -bz;
+    bw = -bw;
+    dot = -dot;
+  }
+  let wa = 1 - t;
+  let wb = t;
+  if (dot < 0.9995) {
+    const theta = Math.acos(dot);
+    const sin = Math.sin(theta);
+    wa = Math.sin((1 - t) * theta) / sin;
+    wb = Math.sin(t * theta) / sin;
+  }
+  const four = (x: readonly number[], y: readonly number[]) =>
+    [mix(x[0], y[0]), mix(x[1], y[1]), mix(x[2], y[2]), mix(x[3], y[3])] as [number, number, number, number];
+  return {
+    ...b,
+    x: mix(a.x, b.x),
+    y: mix(a.y, b.y),
+    z: mix(a.z, b.z),
+    qx: a.qx * wa + bx * wb,
+    qy: a.qy * wa + by * wb,
+    qz: a.qz * wa + bz * wb,
+    qw: a.qw * wa + bw * wb,
+    speed: mix(a.speed, b.speed),
+    steer: mix(a.steer, b.steer),
+    wheelSpin: four(a.wheelSpin, b.wheelSpin),
+    wheelDrop: four(a.wheelDrop, b.wheelDrop),
+  };
 }

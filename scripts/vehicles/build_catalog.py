@@ -26,10 +26,13 @@ OUT = os.path.join(ROOT, 'packages', 'shared', 'src', 'vehicle-catalog.ts')
 #   yaw:       degrees to turn the model so it faces +Z (default: detected)
 #   materials: role -> material names (default: matched by name, see ROLE_PATTERNS)
 #   wheels:    node names (default: detected); [] forces "no separate wheels"
+#   split:     faces of a material above a height (fraction of body height) get their own role
 QUATERNIUS = {'fit': 'width'}
 MODELS = [
     ('policeCar', 'vehicles/singles/police-car.glb', 'Police car', 'vehicle.policeCar', 'police',
-     {**QUATERNIUS, 'materials': {'paint': ['White'], 'sirenA': ['BlueLights'], 'sirenB': ['WhiteLights']}}),
+     {**QUATERNIUS, 'materials': {'paint': ['White'], 'sirenA': ['BlueLights']},
+      # The red half of the light bar shares the tail-light material; the roof part becomes the red siren.
+      'split': [{'material': 'TailLights', 'above': 0.75, 'role': 'sirenB'}]}),
     ('sportsCar', 'vehicles/singles/sports-car.glb', 'Sports car', 'vehicle.sportsCar', 'sports',
      {**QUATERNIUS, 'materials': {'paint': ['White']}}),
     ('suv', 'vehicles/singles/suv.glb', 'SUV', 'vehicle.suv', 'suv', {**QUATERNIUS, 'materials': {'paint': ['White']}}),
@@ -71,6 +74,14 @@ MODELS = [
     ('motorcycle', 'buildings/city-pack/motorcycle.glb', 'Motorcycle', 'vehicle.motorcycle', 'motorcycle', {}),
     ('bicycle', 'buildings/city-pack/bicycle.glb', 'Bicycle', 'vehicle.bicycle', 'bicycle', {'yaw': 90}),
 ]
+
+# Models that are in the asset library but not offered in the game: low quality (no interior, wheels
+# built into the body, odd proportions) or two-wheelers, which need lean physics first. Their entries
+# stay in MODELS so they come back by deleting them from here.
+DISABLED = {
+    'lamborghini', 'classicMuscle', 'mitsubishiL200', 'camaroZl1', 'cyberPickup', 'hatchbackBlue', 'van',
+    'ambulance', 'sushiTruck', 'bus', 'cityBus', 'motorcycle', 'bicycle',
+}
 
 # Used when a model has no material override for a role. Lamps also need to be the right colour
 # family (tail lights red), checked in classify_materials.
@@ -188,7 +199,15 @@ def build(entry):
             wheels.append({'nodes': [names[i]], 'min': b[0], 'max': b[1], 'axle': axle, 'side': side})
 
     materials = classify_materials(g, per_material, opts.get('materials'))
+    height = body[1][1] - body[0][1]
+    # Roof line: top of the windows (the body top can include a light bar or roof rack).
+    glass_pts = [p for name in materials.get('glass', []) for p in rotate(per_material.get(name, []), yaw)]
+    roof = max(p[1] for p in glass_pts) if glass_pts else body[1][1]
+    splits = [{'material': sp['material'], 'above': body[0][1] + sp['above'] * height, 'role': sp['role']}
+              for sp in opts.get('split', [])]
     return {
+        'splits': splits,
+        'roof': roof,
         'key': key, 'label': label, 'url': '/assets/' + rel, 'size': size, 'fit': opts.get('fit', 'length'),
         'handling': handling, 'yaw': round(yaw, 2), 'body': body, 'wheels': wheels, 'materials': materials,
     }
@@ -222,6 +241,7 @@ def emit(models):
         out.append(f'    handling: "{m["handling"]}",')
         out.append(f'    yaw: {ts_num(m["yaw"])},')
         out.append(f'    body: {{ min: {ts_vec(m["body"][0])}, max: {ts_vec(m["body"][1])} }},')
+        out.append(f'    roof: {ts_num(m["roof"])},')
         if m['wheels']:
             out.append('    wheels: [')
             for w in m['wheels']:
@@ -234,6 +254,10 @@ def emit(models):
         mats = ', '.join(f'{role}: [{", ".join(chr(34) + n + chr(34) for n in names)}]'
                          for role, names in m['materials'].items())
         out.append(f'    materials: {{ {mats} }},')
+        if m['splits']:
+            items = ', '.join(f'{{ material: "{sp["material"]}", above: {ts_num(sp["above"])}, role: "{sp["role"]}" }}'
+                              for sp in m['splits'])
+            out.append(f'    splits: [{items}],')
         out.append('  },')
     out.append('} as const satisfies Record<string, VehicleCatalogEntry>;')
     out.append('')
@@ -243,6 +267,8 @@ def emit(models):
 if __name__ == '__main__':
     built = []
     for entry in MODELS:
+        if entry[0] in DISABLED:
+            continue
         m = build(entry)
         b = m['body']
         print(f"{m['key']:16} yaw {m['yaw']:7.1f}  body {[round(b[1][i] - b[0][i], 3) for i in range(3)]}  "

@@ -13,6 +13,8 @@ import {
   Scene,
   ShadowGenerator,
   StandardMaterial,
+  type Observer,
+  Plane,
   Vector3,
 } from '@babylonjs/core';
 import '@babylonjs/loaders/glTF';
@@ -77,6 +79,11 @@ const EXIT_MAX_SPEED = 10 / 3.6; // m/s; you can't step out of a moving car
 // Where the pelvis sits relative to the character's origin in the driving clip (measured).
 const SEATED_HIP_HEIGHT = 0.69;
 const SEATED_HIP_BACK = 0.19;
+// Top of the head above the character's origin in that pose, plus a little headroom.
+const SEATED_HEAD_TOP = 1.49;
+// The clip is a chair-height sitting pose; a car seat is lower, so the legs would poke out under the
+// car. Everything of the driver below this height (car frame) is cut away; it's inside the body anyway.
+const DRIVER_CLIP_HEIGHT = 0.3;
 const DOOR_OPEN_SECONDS = 1.2; // how much of the reach-and-pull "interact" clip to play at the door
 
 /** Getting in and out, step by step. */
@@ -275,13 +282,58 @@ export class MovementSandbox {
   private attachDriver(vehicle: SandboxVehicle) {
     const root = this.character!.root;
     root.parent = vehicle.root!;
-    root.position.set(vehicle.seat.x, vehicle.seat.y - SEATED_HIP_HEIGHT, vehicle.seat.z + SEATED_HIP_BACK);
+    root.position.copyFrom(this.seatedOrigin(vehicle));
     root.rotation.set(0, 0, 0);
     root.setEnabled(vehicle.driverVisible);
     this.character!.play('driving');
+    this.clipDriver(vehicle);
+  }
+
+  /** Character origin when seated, in the car's frame: hips on the seat, head under the roof. */
+  private seatedOrigin(vehicle: SandboxVehicle): Vector3 {
+    const { x, y, z } = vehicle.seat;
+    const originY = Math.min(y - SEATED_HIP_HEIGHT, vehicle.roofTop - SEATED_HEAD_TOP);
+    return new Vector3(x, originY, z + SEATED_HIP_BACK);
+  }
+
+  private readonly clipObservers: { mesh: Mesh; before: Observer<Mesh>; after: Observer<Mesh> }[] = [];
+
+  // Cuts the driver off at the car's floor while they're drawn (a per-mesh clip plane that follows
+  // the car, so it tilts with it on hills and ramps).
+  private clipDriver(vehicle: SandboxVehicle) {
+    this.unclipDriver();
+    const plane = new Plane(0, -1, 0, 0);
+    const meshes = this.character!.root.getChildMeshes(false).filter((m): m is Mesh => m instanceof Mesh);
+    for (const mesh of meshes) {
+      const before = mesh.onBeforeRenderObservable.add(() => {
+        const carRoot = vehicle.root;
+        if (!carRoot) return;
+        const world = carRoot.getWorldMatrix();
+        const up = Vector3.TransformNormal(Vector3.Up(), world).normalize();
+        const floor = Vector3.TransformCoordinates(new Vector3(0, DRIVER_CLIP_HEIGHT, 0), world);
+        // Babylon discards fragments where dot(plane, position) > 0: keep everything above the floor.
+        plane.normal.copyFrom(up).scaleInPlace(-1);
+        plane.d = Vector3.Dot(up, floor);
+        this.scene.clipPlane = plane;
+      });
+      const after = mesh.onAfterRenderObservable.add(() => {
+        this.scene.clipPlane = null;
+      });
+      this.clipObservers.push({ mesh, before: before!, after: after! });
+    }
+  }
+
+  private unclipDriver() {
+    for (const { mesh, before, after } of this.clipObservers) {
+      mesh.onBeforeRenderObservable.remove(before);
+      mesh.onAfterRenderObservable.remove(after);
+    }
+    this.clipObservers.length = 0;
+    this.scene.clipPlane = null;
   }
 
   private detachDriver() {
+    this.unclipDriver();
     const root = this.character?.root;
     if (!root?.parent) return;
     const world = root.getAbsolutePosition().clone();
@@ -528,8 +580,7 @@ export class MovementSandbox {
 
   /** Where the character's origin goes when seated, in world space. */
   private seatWorld(vehicle: SandboxVehicle): Vector3 {
-    const { x, y, z } = vehicle.seat;
-    return Vector3.TransformCoordinates(new Vector3(x, y - SEATED_HIP_HEIGHT, z + SEATED_HIP_BACK), vehicle.root!.getWorldMatrix());
+    return Vector3.TransformCoordinates(this.seatedOrigin(vehicle), vehicle.root!.getWorldMatrix());
   }
 
   private exitVehicle() {
