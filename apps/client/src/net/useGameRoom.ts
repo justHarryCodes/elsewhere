@@ -26,6 +26,8 @@ export function useGameRoom(options: JoinOptions = {}) {
   const [status, setStatus] = useState<ConnectionStatus>('connecting');
   const [playerIds, setPlayerIds] = useState<string[]>([]);
   const [sessionId, setSessionId] = useState<string>();
+  // The room picks the city; every client builds the same one from its seed.
+  const [citySeed, setCitySeed] = useState<number>();
   const players = useRef(new Map<string, PlayerSnapshot>());
   const roomRef = useRef<Room | undefined>(undefined);
 
@@ -44,6 +46,7 @@ export function useGameRoom(options: JoinOptions = {}) {
         setStatus('connected');
 
         const $ = getStateCallbacks(room);
+        $(room.state).listen('citySeed', (seed: number) => setCitySeed(seed));
         $(room.state).players.onAdd((player: PlayerSnapshot, id: string) => {
           players.current.set(id, player);
           setPlayerIds((ids) => [...ids, id]);
@@ -79,5 +82,5 @@ export function useGameRoom(options: JoinOptions = {}) {
     roomRef.current?.send(Messages.Action, { animation } satisfies ActionMessage);
   }, []);
 
-  return { status, players: players as PlayersRef, playerIds, sessionId, sendInput, sendAction };
+  return { status, players: players as PlayersRef, playerIds, sessionId, citySeed, sendInput, sendAction };
 }

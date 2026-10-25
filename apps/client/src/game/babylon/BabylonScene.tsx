@@ -6,13 +6,11 @@ import {
   DirectionalLight,
   Engine,
   HemisphericLight,
-  MeshBuilder,
   Scene,
-  StandardMaterial,
   Vector3,
 } from "@babylonjs/core";
 import "@babylonjs/loaders/glTF";
-import { WORLD_HALF_SIZE, toHumanAnimation, toHumanBody } from "@game/shared";
+import { generateCity, toHumanAnimation, toHumanBody } from "@game/shared";
 import type { PlayersRef } from "../../net/useGameRoom";
 import { approachAngle, smoothing } from "../smoothing";
 import {
@@ -22,6 +20,7 @@ import {
   CAMERA_POLAR,
   CAMERA_TARGET_HEIGHT,
 } from "../camera";
+import { CityRenderer } from "./city";
 import { type HumanCharacter, HumanLibrary } from "./humans";
 
 const CAMERA_ALPHA = Math.PI / 2; // horizontal angle (PI/2 = behind the player, looking toward -Z)
@@ -29,9 +28,11 @@ const CAMERA_ALPHA = Math.PI / 2; // horizontal angle (PI/2 = behind the player,
 export function BabylonScene({
   players,
   selfId,
+  citySeed,
 }: {
   players: PlayersRef;
   selfId?: string;
+  citySeed: number;
 }) {
   const canvasRef = useRef<HTMLCanvasElement>(null);
 
@@ -41,7 +42,10 @@ export function BabylonScene({
     const scene = new Scene(engine);
     // Right-handed like glTF and Three.js: +Z faces the camera, +X is screen-right.
     scene.useRightHandedSystem = true;
-    scene.clearColor = new Color4(0.03, 0.05, 0.1, 1);
+    scene.clearColor = new Color4(0.55, 0.7, 0.85, 1);
+    scene.fogMode = Scene.FOGMODE_EXP2;
+    scene.fogDensity = 0.0015;
+    scene.fogColor = new Color3(0.55, 0.7, 0.85);
 
     const camera = new ArcRotateCamera(
       "camera",
@@ -60,19 +64,14 @@ export function BabylonScene({
     const sun = new DirectionalLight("sun", new Vector3(-0.5, -1, -0.3), scene);
     sun.intensity = 1.2;
 
-    const ground = MeshBuilder.CreateGround(
-      "ground",
-      { width: WORLD_HALF_SIZE * 2 + 2, height: WORLD_HALF_SIZE * 2 + 2 },
-      scene,
-    );
-    const groundMaterial = new StandardMaterial("ground-mat", scene);
-    groundMaterial.diffuseColor = new Color3(0.15, 0.2, 0.25);
-    ground.material = groundMaterial;
-
-    // Load other models at real-world size with loadRealScale(scene, '/assets/car.glb', 'vehicle.sedan').
-
     let library: HumanLibrary | undefined;
     let disposed = false;
+    // The same city the server collides against, from the room's seed.
+    CityRenderer.create(scene, generateCity({ seed: citySeed })).catch((error) =>
+      console.error("Failed to load the city", error),
+    );
+
+    // Load other models at real-world size with loadRealScale(scene, '/assets/car.glb', 'vehicle.sedan').
     HumanLibrary.load(scene)
       .then((loaded) => {
         if (!disposed) library = loaded;
@@ -144,7 +143,7 @@ export function BabylonScene({
       window.removeEventListener("resize", onResize);
       engine.dispose();
     };
-  }, [players, selfId]);
+  }, [players, selfId, citySeed]);
 
   return (
     <canvas ref={canvasRef} className="block h-full w-full outline-none" />

@@ -1,7 +1,7 @@
 import { useEffect, useRef } from "react";
 import * as THREE from "three";
 import { OrbitControls } from "three/addons/controls/OrbitControls.js";
-import { WORLD_HALF_SIZE, toHumanAnimation, toHumanBody } from "@game/shared";
+import { generateCity, toHumanAnimation, toHumanBody } from "@game/shared";
 import type { PlayersRef } from "../../net/useGameRoom";
 import { approachAngle, smoothing } from "../smoothing";
 import {
@@ -11,6 +11,7 @@ import {
   CAMERA_POLAR,
   CAMERA_TARGET_HEIGHT,
 } from "../camera";
+import { CityRenderer } from "./city";
 import { type HumanCharacter, HumanLibrary } from "./humans";
 
 const CAMERA_AZIMUTH = 0; // horizontal angle (0 = behind the player, on the +Z side looking toward -Z)
@@ -18,9 +19,11 @@ const CAMERA_AZIMUTH = 0; // horizontal angle (0 = behind the player, on the +Z 
 export function ThreeScene({
   players,
   selfId,
+  citySeed,
 }: {
   players: PlayersRef;
   selfId?: string;
+  citySeed: number;
 }) {
   const containerRef = useRef<HTMLDivElement>(null);
 
@@ -31,9 +34,10 @@ export function ThreeScene({
     container.appendChild(renderer.domElement);
 
     const scene = new THREE.Scene();
-    scene.background = new THREE.Color(0x080d1a);
+    scene.background = new THREE.Color(0x8cb3d9);
+    scene.fog = new THREE.FogExp2(0x8cb3d9, 0.0015);
 
-    const camera = new THREE.PerspectiveCamera(50, 1, 0.1, 500);
+    const camera = new THREE.PerspectiveCamera(50, 1, 0.1, 2000);
     camera.position.setFromSphericalCoords(
       CAMERA_DISTANCE,
       CAMERA_POLAR,
@@ -49,18 +53,19 @@ export function ThreeScene({
     sun.position.set(10, 20, 5);
     scene.add(sun);
 
-    const groundSize = WORLD_HALF_SIZE * 2 + 2;
-    const ground = new THREE.Mesh(
-      new THREE.PlaneGeometry(groundSize, groundSize),
-      new THREE.MeshStandardMaterial({ color: 0x26333f }),
-    );
-    ground.rotation.x = -Math.PI / 2;
-    scene.add(ground);
+    let library: HumanLibrary | undefined;
+    let city: CityRenderer | undefined;
+    let disposed = false;
+    // The same city the server collides against, from the room's seed.
+    CityRenderer.create(generateCity({ seed: citySeed }))
+      .then((loaded) => {
+        if (disposed) return loaded.dispose();
+        city = loaded;
+        scene.add(loaded.root);
+      })
+      .catch((error) => console.error("Failed to load the city", error));
 
     // Load other models with GLTFLoader and scale them with fitScaleFactor() from @game/shared.
-
-    let library: HumanLibrary | undefined;
-    let disposed = false;
     HumanLibrary.load()
       .then((loaded) => {
         if (disposed) loaded.dispose();
@@ -158,12 +163,11 @@ export function ThreeScene({
       controls.dispose();
       humans.forEach((human) => human.character.dispose());
       library?.dispose();
-      ground.geometry.dispose();
-      ground.material.dispose();
+      city?.dispose();
       renderer.dispose();
       renderer.domElement.remove();
     };
-  }, [players, selfId]);
+  }, [players, selfId, citySeed]);
 
   return <div ref={containerRef} className="h-full w-full" />;
 }

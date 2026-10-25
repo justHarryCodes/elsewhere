@@ -5,3 +5,5 @@ export * from "./physics-config";
 export * from "./physics-core";
 export * from "./physics-extra";
 export * from "./physics-vehicle";
+export * from "./physics-city";
+export * from "./physics-walker";

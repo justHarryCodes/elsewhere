@@ -31,13 +31,22 @@ import {
   type HumanBody,
   defaultAppearance,
   type SizeKey,
+  CITY_CELL,
+  KERB_HEIGHT,
   type VehicleModelKey,
+  CITY_SEED,
+  type City,
+  type CityZone,
+  generateCity,
 } from '@game/shared';
+import { CityRenderer } from '../game/babylon/city';
 import { type HumanCharacter, HumanLibrary } from '../game/babylon/humans';
 import { measureNode } from '../game/babylon/realScale';
 import { SandboxVehicle, type VehicleStats } from './sandboxVehicle';
 
 export type MoveMode = 'walk' | 'jog' | 'sprint';
+/** Where the teleport buttons go: the test yard, or the middle of a district. */
+export type SandboxPlace = 'yard' | CityZone;
 
 export interface SandboxStats {
   loading: boolean;
@@ -76,6 +85,10 @@ const KEYS = {
   right: ['KeyD', 'ArrowRight'],
 };
 const GROUND_SIZE = 200;
+// The city starts just north of the test yard's ground and is centred on it east-west.
+const CITY_ORIGIN = { x: -500, z: GROUND_SIZE / 2 + 4 };
+const LANE_OFFSET = 1.6; // metres from a road's centre line to the middle of the right-hand lane
+const SHADOW_RANGE = 90; // metres of shadow round the camera
 const CAMERA_TARGET_HEIGHT = 1.1;
 const DRIVING_CAMERA_RADIUS = 9;
 const ENTER_DISTANCE = 1.5; // metres from the car's outline to get in
@@ -120,6 +133,9 @@ export class MovementSandbox {
   private library?: HumanLibrary;
   private character?: HumanCharacter;
   private disposed = false;
+  // The zoom the player chose, and the radius last set here (pulled in when a wall is in the way).
+  private preferredRadius = 6;
+  private appliedRadius = 6;
 
   private body: HumanBody = 'male';
   private appearance: HumanAppearance = defaultAppearance('male');
@@ -138,6 +154,8 @@ export class MovementSandbox {
   private readonly glow: GlowLayer;
   private readonly sun: DirectionalLight;
   private groundMaterial?: StandardMaterial;
+  private readonly city: City;
+  private cityRenderer?: CityRenderer;
   private vehicle?: SandboxVehicle;
   private vehicleError?: string;
   private driving = false;
@@ -164,6 +182,12 @@ export class MovementSandbox {
     this.sun = new DirectionalLight('sun', new Vector3(-0.4, -1, -0.6), this.scene);
     this.sun.position = new Vector3(20, 40, 30);
     this.sun.intensity = DAY.sun;
+    // Shadows cover the area round the camera (see update), not everything that casts one: across a
+    // kilometre of city a 2048 map would be too coarse to show anything.
+    this.sun.autoUpdateExtends = false;
+    this.sun.shadowFrustumSize = SHADOW_RANGE;
+    this.sun.shadowMinZ = 1;
+    this.sun.shadowMaxZ = 300;
     this.shadows = new ShadowGenerator(2048, this.sun);
     this.shadows.useBlurExponentialShadowMap = true;
     // Lamps glow through their emissive colour; this layer adds the bloom around them.
@@ -175,8 +199,21 @@ export class MovementSandbox {
 
     this.createGround();
     this.createReferences();
+    this.scene.fogMode = Scene.FOGMODE_EXP2;
+    this.scene.fogDensity = 0.0012;
+    this.scene.fogColor = new Color3(DAY.sky.r, DAY.sky.g, DAY.sky.b);
 
-    SandboxVehicle.create(this.scene, this.shadows, REFERENCES.map(referenceBlock))
+    this.city = generateCity({ seed: CITY_SEED, origin: CITY_ORIGIN });
+    CityRenderer.create(this.scene, this.city, { outsideGround: true })
+      .then((city) => {
+        if (this.disposed) return city.dispose();
+        this.cityRenderer = city;
+        // Street lamps don't glow yet, and leaving the city out of the glow pass halves its cost.
+        for (const mesh of city.meshes) this.glow.addExcludedMesh(mesh);
+      })
+      .catch((error: unknown) => console.error('Failed to load the city', error));
+
+    SandboxVehicle.create(this.scene, this.shadows, REFERENCES.map(referenceBlock), this.city)
       .then((vehicle) => {
         if (this.disposed) vehicle.dispose();
         else this.vehicle = vehicle;
@@ -188,6 +225,7 @@ export class MovementSandbox {
       });
 
     this.scene.onBeforeRenderObservable.add(() => this.update(this.engine.getDeltaTime() / 1000));
+    this.scene.onBeforeRenderObservable.add(() => this.keepCameraClear(this.engine.getDeltaTime() / 1000));
     this.engine.runRenderLoop(() => this.scene.render());
 
     window.addEventListener('keydown', this.onKeyDown);
@@ -274,6 +312,44 @@ export class MovementSandbox {
     this.vehicle?.placeWalker(this.character.root.position);
     this.velocityY = 0;
     this.grounded = true;
+  }
+
+  /**
+   * Jumps to the test yard or the middle of a district: the car is put in the right-hand lane of a
+   * nearby street and the character on the sidewalk beside it (or still at the wheel if driving).
+   */
+  teleport(place: SandboxPlace) {
+    if (!this.character) return;
+    let car: { x: number; z: number; heading: number };
+    if (place === 'yard') {
+      car = { x: -4, z: 6, heading: 0 };
+    } else {
+      const district = this.city.districts.find((d) => d.zone === place)!;
+      const cx = (district.x0 + district.x1) / 2;
+      const cz = (this.city.bounds.z0 + this.city.bounds.z1) / 2;
+      const spot = this.city.spots
+        .filter((s) => s.zone === place)
+        .reduce((best, s) => (Math.hypot(s.x - cx, s.z - cz) < Math.hypot(best.x - cx, best.z - cz) ? s : best));
+      // Right of the direction of travel is -X when facing +Z.
+      car = {
+        x: spot.x - Math.cos(spot.heading) * LANE_OFFSET,
+        z: spot.z + Math.sin(spot.heading) * LANE_OFFSET,
+        heading: spot.heading,
+      };
+    }
+    if (this.driving || this.boarding) {
+      void this.rebuildVehicle((vehicle) => vehicle.respawn(car));
+      return;
+    }
+    const root = this.character.root;
+    // On the sidewalk to the car's right (or beside it in the yard), facing the same way.
+    const side = place === 'yard' ? 2.6 : CITY_CELL / 2 - LANE_OFFSET - 0.5;
+    root.position.set(car.x - Math.cos(car.heading) * side, place === 'yard' ? 0 : KERB_HEIGHT, car.z + Math.sin(car.heading) * side);
+    root.rotation.set(0, car.heading, 0);
+    this.vehicle?.placeWalker(root.position);
+    this.velocityY = 0;
+    this.camera.target.copyFrom(root.position.add(new Vector3(0, CAMERA_TARGET_HEIGHT, 0)));
+    if (this.vehicle) void this.vehicle.respawn(car);
   }
 
   setVehicleModel(model: VehicleModelKey) {
@@ -387,6 +463,7 @@ export class MovementSandbox {
     this.sun.intensity = look.sun;
     this.scene.environmentIntensity = look.env;
     this.groundMaterial?.diffuseColor.copyFrom(look.ground);
+    this.scene.fogColor.set(look.sky.r, look.sky.g, look.sky.b);
     // Nobody drives at night with the lights off.
     if (night && this.vehicle?.getStats(this.driving).headlights === 'off') this.vehicle.setHeadlights('low');
   }
@@ -432,6 +509,7 @@ export class MovementSandbox {
     window.removeEventListener('blur', this.onBlur);
     window.removeEventListener('resize', this.onResize);
     this.vehicle?.dispose();
+    this.cityRenderer?.dispose();
     this.engine.dispose();
   }
 
@@ -454,6 +532,8 @@ export class MovementSandbox {
   }
 
   private update(dt: number) {
+    // Keep the shadow-casting sun over the camera.
+    this.sun.position.copyFrom(this.camera.target.subtract(this.sun.direction.normalizeToNew().scale(150)));
     const vehicle = this.vehicle;
     if (vehicle) {
       const input = this.readInput();
@@ -496,12 +576,7 @@ export class MovementSandbox {
       position: root.position.add(step),
       grounded: root.position.y + step.y <= 0,
     };
-    const half = GROUND_SIZE / 2 - 1;
-    root.position.set(
-      Math.max(-half, Math.min(half, result.position.x)),
-      Math.max(0, result.position.y),
-      Math.max(-half, Math.min(half, result.position.z)),
-    );
+    root.position.set(result.position.x, Math.max(0, result.position.y), result.position.z);
     const wasGrounded = this.grounded;
     this.grounded = result.grounded || root.position.y <= 0;
     if (this.grounded && this.velocityY < 0) this.velocityY = 0;
@@ -524,6 +599,23 @@ export class MovementSandbox {
     // is camera-relative, strafing would then walk in circles).
     const target = root.position.add(new Vector3(0, CAMERA_TARGET_HEIGHT, 0));
     this.camera.target.copyFrom(Vector3.Lerp(this.camera.target, target, 1 - Math.exp(-10 * dt)));
+  }
+
+  /**
+   * Pulls the camera in front of any building or wall between it and the character, so it never ends
+   * up inside one, then eases back out to the chosen zoom when the view clears.
+   */
+  private keepCameraClear(dt: number) {
+    const camera = this.camera;
+    if (Math.abs(camera.radius - this.appliedRadius) > 1e-3) this.preferredRadius = camera.radius; // zoomed
+    const dir = camera.position.subtract(camera.target);
+    if (!this.vehicle || dir.lengthSquared() < 1e-6) return;
+    dir.normalize();
+    const hit = this.vehicle.castStatic(camera.target, dir, this.preferredRadius);
+    const clear = hit === undefined ? this.preferredRadius : Math.max(camera.lowerRadiusLimit ?? 1, hit - 0.4);
+    const radius = clear < camera.radius ? clear : camera.radius + (clear - camera.radius) * (1 - Math.exp(-3 * dt));
+    camera.radius = radius;
+    this.appliedRadius = radius;
   }
 
   // Chase camera: target rides with the car and the orbit swings round behind it. Mouse drag still

@@ -1,4 +1,3 @@
-import type { Collider, KinematicCharacterController, RigidBody } from '@dimforge/rapier3d-compat';
 import {
   Color3,
   InstancedMesh,
@@ -20,14 +19,19 @@ import {
   type PaintFinish,
   type VehicleModelKey,
   type VehicleSnapshot,
+  type City,
 } from '@game/shared';
 import {
   RULES,
   type Sim,
   type VehicleInput,
   addCatalogBody,
+  addCityColliders,
   addStaticBox,
   addVehicle,
+  createWalker,
+  moveWalker,
+  type Walker,
   createWorld,
   enablePhysicsEvents,
   indexColliders,
@@ -40,10 +44,6 @@ import {
 import { VehicleLibrary, type VehicleVisual } from '../game/babylon/vehicles';
 
 const CAR = 'car';
-const WALKER_RADIUS = 0.3; // about shoulder half-width
-const SKIN = 0.02; // gap the controller keeps from surfaces
-const STEP_HEIGHT = 0.35; // highest step walked up without jumping (a standard stair is 0.18)
-const PLAYER_MASS = 80; // kg, for pushing crates
 const MAX_STEPS_PER_FRAME = 5; // never spiral: drop time rather than run 10 steps after a stall
 const CRATE = { x: 12, z: 18, size: 1 };
 
@@ -94,9 +94,10 @@ export class SandboxVehicle {
     private readonly library: VehicleLibrary,
   ) {}
 
-  static async create(scene: Scene, shadows: ShadowGenerator, blocks: StaticBlock[]): Promise<SandboxVehicle> {
+  static async create(scene: Scene, shadows: ShadowGenerator, blocks: StaticBlock[], city?: City): Promise<SandboxVehicle> {
     const sim = await createWorld();
     addStaticBox(sim, 'ground', { x: 0, y: -0.5, z: 0 }, { x: 500, y: 0.5, z: 500 }, 'asphalt');
+    if (city) addCityColliders(sim, city);
     blocks.forEach((b, i) =>
       addStaticBox(sim, `block-${i}`, { x: b.x, y: b.height / 2, z: b.z }, { x: b.width / 2, y: b.height / 2, z: b.depth / 2 }),
     );
@@ -119,28 +120,10 @@ export class SandboxVehicle {
   // Rapier's character controller: it is blocked by cars, walls and crates (sliding along them),
   // walks up ramps and slopes, climbs steps, falls off edges and lands on whatever is below.
 
-  private walker?: { body: RigidBody; collider: Collider; controller: KinematicCharacterController };
+  private walker?: Walker;
 
   private addWalker() {
-    const { RAPIER, world } = this.sim;
-    const radius = WALKER_RADIUS;
-    const halfHeight = HUMAN_METRICS.height / 2 - radius;
-    const body = world.createRigidBody(RAPIER.RigidBodyDesc.kinematicPositionBased().setTranslation(0, 0, 0));
-    // Feet at the body's origin, like the drawn character.
-    const collider = world.createCollider(
-      RAPIER.ColliderDesc.capsule(halfHeight, radius).setTranslation(0, halfHeight + radius, 0),
-      body,
-    );
-    const controller = world.createCharacterController(SKIN);
-    controller.setUp({ x: 0, y: 1, z: 0 });
-    controller.setSlideEnabled(true);
-    controller.setMaxSlopeClimbAngle((45 * Math.PI) / 180); // steeper than this is a wall
-    controller.setMinSlopeSlideAngle((50 * Math.PI) / 180);
-    controller.enableAutostep(STEP_HEIGHT, 0.15, false); // stairs and kerbs, not crates
-    controller.enableSnapToGround(0.3); // stay on the ground walking down slopes and steps
-    controller.setApplyImpulsesToDynamicBodies(true); // walking into a crate pushes it
-    controller.setCharacterMass(PLAYER_MASS);
-    this.walker = { body, collider, controller };
+    this.walker = createWalker(this.sim, { x: 0, y: 0, z: 0 });
   }
 
   /**
@@ -148,18 +131,23 @@ export class SandboxVehicle {
    * where it ends up and whether it is standing on something.
    */
   moveWalker(from: Vector3, delta: Vector3): { position: Vector3; grounded: boolean } {
-    const walker = this.walker;
-    if (!walker) {
+    if (!this.walker) {
       const to = from.add(delta);
       to.y = Math.max(0, to.y);
       return { position: to, grounded: to.y <= 0 };
     }
-    walker.body.setTranslation({ x: from.x, y: from.y, z: from.z }, false);
-    walker.controller.computeColliderMovement(walker.collider, { x: delta.x, y: delta.y, z: delta.z });
-    const m = walker.controller.computedMovement();
-    const to = new Vector3(from.x + m.x, from.y + m.y, from.z + m.z);
-    walker.body.setNextKinematicTranslation({ x: to.x, y: to.y, z: to.z });
-    return { position: to, grounded: walker.controller.computedGrounded() };
+    const { position, grounded } = moveWalker(this.walker, delta, from);
+    return { position: new Vector3(position.x, position.y, position.z), grounded };
+  }
+
+  /**
+   * How far a ray from `from` along the unit vector `dir` gets before hitting something that doesn't
+   * move (buildings, walls, the ground), up to `max` metres; undefined when nothing is in the way.
+   */
+  castStatic(from: Vector3, dir: Vector3, max: number): number | undefined {
+    const { RAPIER, world } = this.sim;
+    const hit = world.castRay(new RAPIER.Ray(from, dir), max, true, RAPIER.QueryFilterFlags.ONLY_FIXED);
+    return hit?.timeOfImpact;
   }
 
   /** Keeps the capsule where the character is (after a teleport). */
@@ -292,10 +280,11 @@ export class SandboxVehicle {
     setSiren(this.sim, CAR, on);
   }
 
-  /** Puts the car back on its wheels where it is, facing the same way. */
-  async respawn() {
+  /** Puts the car back on its wheels where it is (or at `at`), facing the same way (or `at.heading`). */
+  async respawn(at?: { x: number; z: number; heading: number }) {
     const s = this.snapshot;
-    await this.spawn(s ? { x: s.x, z: s.z } : { x: -4, z: 6 }, this.heading);
+    if (at) await this.spawn(at, at.heading);
+    else await this.spawn(s ? { x: s.x, z: s.z } : { x: -4, z: 6 }, this.heading);
   }
 
   getStats(driving: boolean): VehicleStats {

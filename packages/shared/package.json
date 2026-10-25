@@ -24,5 +24,12 @@
   },
   "dependencies": {
     "@dimforge/rapier3d-compat": "^0.21.0"
+  },
+  "typesVersions": {
+    "*": {
+      "physics": [
+        "dist/physics.d.ts"
+      ]
+    }
   }
 }

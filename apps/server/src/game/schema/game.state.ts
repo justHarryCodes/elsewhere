@@ -14,5 +14,7 @@ export class Player extends Schema implements PlayerSnapshot {
 }
 
 export class GameState extends Schema {
+  /** Seed of the city everyone is in; clients generate the same city from it. */
+  @type('uint32') citySeed = 0;
   @type({ map: Player }) players = new MapSchema<Player>();
 }

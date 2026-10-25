@@ -16,7 +16,7 @@ import {
   type HumanBody,
   type VehicleModelKey,
 } from '@game/shared';
-import { type MoveMode, MovementSandbox, type SandboxStats } from './movementSandbox';
+import { type MoveMode, MovementSandbox, type SandboxPlace, type SandboxStats } from './movementSandbox';
 
 const ANIMATIONS = Object.entries(HUMAN_ANIMATIONS) as [HumanAnimation, (typeof HUMAN_ANIMATIONS)[HumanAnimation]][];
 const LIBRARY_ORDER: AnimationLibrary[] = ['ual2', 'ual1'];
@@ -29,6 +29,12 @@ const SPEED_RATIOS = [0.25, 0.5, 1, 1.5, 2];
 const VEHICLES = (Object.entries(VEHICLE_MODELS) as [VehicleModelKey, (typeof VEHICLE_MODELS)[VehicleModelKey]][]).sort(
   (a, b) => a[1].label.localeCompare(b[1].label),
 );
+const PLACES: { place: SandboxPlace; label: string }[] = [
+  { place: 'yard', label: 'Test yard' },
+  { place: 'residential', label: 'Homes' },
+  { place: 'commercial', label: 'Downtown' },
+  { place: 'industrial', label: 'Industry' },
+];
 const HEADLIGHT_MODES: HeadlightMode[] = ['off', 'low', 'high'];
 // Common car paints: white, silver, black, red, blue, yellow, green, orange.
 const PAINTS = ['#f1f5f9', '#94a3b8', '#111827', '#dc2626', '#2563eb', '#facc15', '#15803d', '#ea580c'];
@@ -228,6 +234,28 @@ export function SandboxPage() {
             Reset position
           </button>
         </div>
+
+        <section className="flex flex-col gap-2 rounded-lg bg-slate-900 p-3">
+          <h2 className="text-sm font-semibold">City</h2>
+          <p className="text-xs text-slate-400">
+            1 km of streets north of the yard: homes to the west, downtown in the middle, industry to the east.
+          </p>
+          <div className="grid grid-cols-4 gap-1">
+            {PLACES.map(({ place, label }) => (
+              <button
+                key={place}
+                type="button"
+                onClick={(event) => {
+                  sandbox()?.teleport(place);
+                  event.currentTarget.blur();
+                }}
+                className="rounded-md bg-slate-800 px-1 py-1 text-xs hover:bg-slate-700"
+              >
+                {label}
+              </button>
+            ))}
+          </div>
+        </section>
 
         <section className="flex flex-col gap-2 rounded-lg bg-slate-900 p-3">
           <header className="flex items-center justify-between">

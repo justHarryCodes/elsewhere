@@ -6,13 +6,13 @@ import { HUMAN_METRICS } from './scale';
 export * from './humans';
 export * from './scale';
 export * from './vehicles';
+export * from './city';
 
 export const ROOM_NAME = 'game';
 export const SERVER_PORT = 3000;
 
 export const TICK_RATE = 20;
 export const PLAYER_SPEED = HUMAN_METRICS.runSpeed; // metres per second
-export const WORLD_HALF_SIZE = 24;
 
 export const Messages = {
   Input: 'input',

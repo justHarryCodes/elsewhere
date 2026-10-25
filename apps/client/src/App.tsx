@@ -9,17 +9,17 @@ type Renderer = "babylon" | "three";
 
 export function App() {
   const [renderer, setRenderer] = useState<Renderer>("babylon");
-  const { status, players, playerIds, sessionId, sendInput, sendAction } =
+  const { status, players, playerIds, sessionId, citySeed, sendInput, sendAction } =
     useGameRoom();
   useKeyboardInput(sendInput);
   useActionHotkeys(sendAction);
 
   return (
     <div className="relative h-full w-full overflow-hidden bg-slate-950 text-slate-100">
-      {renderer === "babylon" ? (
-        <BabylonScene players={players} selfId={sessionId} />
+      {citySeed === undefined ? null : renderer === "babylon" ? (
+        <BabylonScene players={players} selfId={sessionId} citySeed={citySeed} />
       ) : (
-        <ThreeScene players={players} selfId={sessionId} />
+        <ThreeScene players={players} selfId={sessionId} citySeed={citySeed} />
       )}
 
       <header className="pointer-events-none absolute inset-x-0 top-0 flex items-start justify-between gap-4 p-4">
