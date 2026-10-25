@@ -74,9 +74,11 @@ The header toggle switches between the Babylon.js and Three.js renderers.
   (low/high), brake, reverse and siren lamps. Models whose wheels are part of the body still drive, without spinning.
 - The sky (`public/assets/environment/sky.hdr`, from `scripts/environment/make_sky_hdr.py`) lights every PBR material
   and gives paint its reflections.
-- Try it in `/sandbox`: walk to the car and press **E**: the character walks to the door, opens it and gets in
-  (hidden while driving: the cars have no interior). The character is fully physical: blocked by cars, walls and
-  crates (and pushes crates), walks up the ramp and the staircase, falls off edges and lands on what is below.
+- Try it in `/sandbox`: walk to the car and press **E**: the character walks to the door, reaches for it and fades
+  into the car (hidden while driving: the cars have no interior). Getting out needs the car stopped; the character
+  fades back in beside the door. The character is fully physical: blocked by cars, walls and crates, walks up the
+  ramp and the staircase, falls off edges and lands on what is below. They can push crates (with a person's
+  strength) but not cars, and an empty car keeps its parking brake on.
   W/S throttle and brake (hold S to reverse), A/D steer, Space handbrake, **L** headlights, **K** siren, **N** night,
   stop and **E** to get out.
 
@@ -94,8 +96,10 @@ The header toggle switches between the Babylon.js and Three.js renderers.
 - Physics: `addCityColliders(sim, city)` (`@game/shared/physics`) adds the lots, sidewalks, buildings and solid props
   as boxes. The server now moves players with the same physical walker as the sandbox (`physics-walker.ts`), so
   they're blocked by buildings, step up kerbs and spawn on a downtown sidewalk.
-- Drawing: `CityRenderer` (Babylon `game/babylon/city.ts`, Three `game/three/city.ts`) loads each model once and
-  draws every copy as an instance, batched per 200 m chunk so off-screen chunks are skipped.
+- Drawing: `CityRenderer` (Babylon `game/babylon/city.ts`) streams the city in 100 m chunks round the camera: chunks
+  within 220 m are built nearest first, one at a time, rising out of the ground; chunks more than 300 m behind sink
+  away and are freed. Models are loaded the first time a chunk needs them, and every copy is an instance. (The
+  Three.js renderer, `game/three/city.ts`, still draws the whole city at once.)
 - In `/sandbox` the city sits just north of the test yard; the **City** buttons jump to the yard or a district with
   the car parked beside you.
 

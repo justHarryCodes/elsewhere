@@ -75,6 +75,8 @@ export interface VehicleStats {
  */
 export class SandboxVehicle {
   readonly input: VehicleInput = { throttle: 0, steer: 0, handbrake: false };
+  /** Nobody at the wheel: the parking brake holds the car. */
+  parked = true;
   private visual?: VehicleVisual;
   private snapshot?: VehicleSnapshot;
   private previous?: VehicleSnapshot;
@@ -130,13 +132,13 @@ export class SandboxVehicle {
    * Moves the character by `delta` (metres; y includes gravity and jumps) from `from`, and returns
    * where it ends up and whether it is standing on something.
    */
-  moveWalker(from: Vector3, delta: Vector3): { position: Vector3; grounded: boolean } {
+  moveWalker(from: Vector3, delta: Vector3, dt: number): { position: Vector3; grounded: boolean } {
     if (!this.walker) {
       const to = from.add(delta);
       to.y = Math.max(0, to.y);
       return { position: to, grounded: to.y <= 0 };
     }
-    const { position, grounded } = moveWalker(this.walker, delta, from);
+    const { position, grounded } = moveWalker(this.walker, delta, from, dt);
     return { position: new Vector3(position.x, position.y, position.z), grounded };
   }
 
@@ -173,7 +175,7 @@ export class SandboxVehicle {
     this.accumulator = Math.min(this.accumulator + dt, RULES.DT * MAX_STEPS_PER_FRAME);
     while (this.accumulator >= RULES.DT) {
       const car = this.sim.bodies.get(CAR)?.vehicle;
-      if (car) car.input = this.input;
+      if (car) car.input = this.parked ? null : this.input;
       this.previous = this.snapshot;
       stepAll(this.sim);
       this.snapshot = vehicleSnapshot(this.sim, CAR) ?? undefined;

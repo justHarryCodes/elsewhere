@@ -44,7 +44,7 @@ export function BabylonScene({
     scene.useRightHandedSystem = true;
     scene.clearColor = new Color4(0.55, 0.7, 0.85, 1);
     scene.fogMode = Scene.FOGMODE_EXP2;
-    scene.fogDensity = 0.0015;
+    scene.fogDensity = 0.003; // thick enough to soften where the city is building in
     scene.fogColor = new Color3(0.55, 0.7, 0.85);
 
     const camera = new ArcRotateCamera(
@@ -66,10 +66,9 @@ export function BabylonScene({
 
     let library: HumanLibrary | undefined;
     let disposed = false;
-    // The same city the server collides against, from the room's seed.
-    CityRenderer.create(scene, generateCity({ seed: citySeed })).catch((error) =>
-      console.error("Failed to load the city", error),
-    );
+    // The same city the server collides against, from the room's seed, built in chunks round the
+    // camera as the player moves.
+    const city = CityRenderer.create(scene, generateCity({ seed: citySeed }));
 
     // Load other models at real-world size with loadRealScale(scene, '/assets/car.glb', 'vehicle.sedan').
     HumanLibrary.load(scene)
@@ -84,6 +83,7 @@ export function BabylonScene({
       { character: HumanCharacter; animation?: string; seq: number }
     >();
     scene.onBeforeRenderObservable.add(() => {
+      city.update(camera.target, engine.getDeltaTime() / 1000);
       if (!library) return;
       const t = smoothing(engine.getDeltaTime() / 1000);
       // Follow the given player, or the first one in the room if no selfId is passed.
@@ -140,6 +140,7 @@ export function BabylonScene({
 
     return () => {
       disposed = true;
+      city.dispose();
       window.removeEventListener("resize", onResize);
       engine.dispose();
     };

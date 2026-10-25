@@ -65,7 +65,7 @@ export interface SandboxStats {
   vehicle?: VehicleStats;
   vehicleError?: string;
   driving: boolean;
-  /** Walking to the door, opening it, sitting down or climbing out. */
+  /** Walking to the door, opening it, fading into the car or back out of it. */
   boarding: boolean;
   /** Close enough to the car to get in with E. */
   nearVehicle: boolean;
@@ -92,7 +92,7 @@ const SHADOW_RANGE = 90; // metres of shadow round the camera
 const CAMERA_TARGET_HEIGHT = 1.1;
 const DRIVING_CAMERA_RADIUS = 9;
 const ENTER_DISTANCE = 1.5; // metres from the car's outline to get in
-const EXIT_MAX_SPEED = 10 / 3.6; // m/s; you can't step out of a moving car
+const EXIT_MAX_SPEED = 0.3; // m/s; the car has to be stopped to get out
 // Where the pelvis sits relative to the character's origin in the driving clip (measured).
 const SEATED_HIP_HEIGHT = 0.69;
 const SEATED_HIP_BACK = 0.19;
@@ -102,13 +102,14 @@ const SEATED_HEAD_TOP = 1.49;
 // car. Everything of the driver below this height (car frame) is cut away; it's inside the body anyway.
 const DRIVER_CLIP_HEIGHT = 0.3;
 const MAX_FALL_SPEED = 50; // m/s, terminal velocity of a falling person
-const DOOR_OPEN_SECONDS = 1.2; // how much of the reach-and-pull "interact" clip to play at the door
+const DOOR_OPEN_SECONDS = 0.8; // how much of the reach-and-pull "interact" clip to play at the door
+const BOARD_FADE_SECONDS = 0.35; // fading into the car, or out of it
 
 /** Getting in and out, step by step. */
 type Boarding =
   | { phase: 'toDoor'; elapsed: number }
   | { phase: 'opening'; left: number }
-  | { phase: 'sitting' | 'standing'; t: number; duration: number; from: Vector3; fromHeading: number };
+  | { phase: 'vanishing' | 'appearing'; t: number };
 
 const DAY = { sky: new Color4(0.55, 0.7, 0.85, 1), hemi: 0.7, sun: 1.6, env: 1, ground: new Color3(0.42, 0.5, 0.42) };
 const NIGHT = { sky: new Color4(0.02, 0.03, 0.07, 1), hemi: 0.06, sun: 0.04, env: 0.05, ground: new Color3(0.3, 0.33, 0.36) };
@@ -155,7 +156,7 @@ export class MovementSandbox {
   private readonly sun: DirectionalLight;
   private groundMaterial?: StandardMaterial;
   private readonly city: City;
-  private cityRenderer?: CityRenderer;
+  private readonly cityRenderer: CityRenderer;
   private vehicle?: SandboxVehicle;
   private vehicleError?: string;
   private driving = false;
@@ -200,18 +201,20 @@ export class MovementSandbox {
     this.createGround();
     this.createReferences();
     this.scene.fogMode = Scene.FOGMODE_EXP2;
-    this.scene.fogDensity = 0.0012;
+    this.scene.fogDensity = 0.003; // thick enough to soften where the city is building in
     this.scene.fogColor = new Color3(DAY.sky.r, DAY.sky.g, DAY.sky.b);
 
     this.city = generateCity({ seed: CITY_SEED, origin: CITY_ORIGIN });
-    CityRenderer.create(this.scene, this.city, { outsideGround: true })
-      .then((city) => {
-        if (this.disposed) return city.dispose();
-        this.cityRenderer = city;
-        // Street lamps don't glow yet, and leaving the city out of the glow pass halves its cost.
-        for (const mesh of city.meshes) this.glow.addExcludedMesh(mesh);
-      })
-      .catch((error: unknown) => console.error('Failed to load the city', error));
+    // Built in chunks round the camera as you go (see update). Street lamps don't glow yet, and
+    // leaving the city out of the glow pass halves its cost.
+    this.cityRenderer = CityRenderer.create(this.scene, this.city, {
+      outsideGround: true,
+      onMesh: (mesh) => {
+        this.glow.addExcludedMesh(mesh);
+        mesh.onDisposeObservable.addOnce(() => this.glow.removeExcludedMesh(mesh));
+      },
+    });
+    for (const mesh of this.cityRenderer.meshes) this.glow.addExcludedMesh(mesh);
 
     SandboxVehicle.create(this.scene, this.shadows, REFERENCES.map(referenceBlock), this.city)
       .then((vehicle) => {
@@ -270,6 +273,7 @@ export class MovementSandbox {
     this.boarding = undefined;
     const root = this.character.root;
     root.setEnabled(true);
+    this.setCharacterFade(1);
     if (this.vehicle) {
       const door = this.vehicle.exitPoint();
       root.position.set(door.x, 0, door.z);
@@ -305,6 +309,7 @@ export class MovementSandbox {
     this.driving = false;
     this.boarding = undefined;
     this.character.root.setEnabled(true);
+    this.setCharacterFade(1);
     this.character.root.rotation.set(0, 0, 0);
     this.character.play('idle');
     this.character.root.position.set(0, 0, 0);
@@ -384,6 +389,8 @@ export class MovementSandbox {
     if (this.boarding) {
       this.boarding = undefined;
       this.character.root.setEnabled(true);
+      this.setCharacterFade(1);
+      vehicle.setWalkerEnabled(true);
       this.character.play('idle');
     }
     const wasDriving = this.driving;
@@ -509,7 +516,7 @@ export class MovementSandbox {
     window.removeEventListener('blur', this.onBlur);
     window.removeEventListener('resize', this.onResize);
     this.vehicle?.dispose();
-    this.cityRenderer?.dispose();
+    this.cityRenderer.dispose();
     this.engine.dispose();
   }
 
@@ -532,11 +539,13 @@ export class MovementSandbox {
   }
 
   private update(dt: number) {
+    this.cityRenderer.update(this.camera.target, dt);
     // Keep the shadow-casting sun over the camera.
     this.sun.position.copyFrom(this.camera.target.subtract(this.sun.direction.normalizeToNew().scale(150)));
     const vehicle = this.vehicle;
     if (vehicle) {
       const input = this.readInput();
+      vehicle.parked = !this.driving; // the parking brake holds an empty car
       vehicle.input.throttle = this.driving ? input.forward : 0;
       vehicle.input.steer = this.driving ? input.right : 0;
       vehicle.input.handbrake = this.driving && this.keys.has('Space');
@@ -572,7 +581,7 @@ export class MovementSandbox {
     // walks up the ramp and stairs, and lands on whatever is below.
     this.velocityY = Math.max(this.velocityY + GRAVITY * dt, -MAX_FALL_SPEED);
     const step = new Vector3(move.x * this.speed * dt, this.velocityY * dt, move.z * this.speed * dt);
-    const result = this.vehicle?.moveWalker(root.position, step) ?? {
+    const result = this.vehicle?.moveWalker(root.position, step, dt) ?? {
       position: root.position.add(step),
       grounded: root.position.y + step.y <= 0,
     };
@@ -639,10 +648,10 @@ export class MovementSandbox {
   }
 
   /**
-   * Getting in: walk to the driver's door, open it (the "interact" reach-and-pull), turn and sit
-   * into the seat, then ride along parented to the car. None of the current models have doors as
-   * separate parts, so the door itself doesn't swing; the character's motion sells it. Bikes skip
-   * the door. Getting out plays it backwards.
+   * Getting in: walk to the driver's door, reach for it (the "interact" clip), then fade into the
+   * car; the driver rides along hidden inside. Bikes have no door: the rider gets straight on.
+   * Getting out (only once the car has stopped) is the reverse: the character fades in, standing,
+   * beside the door.
    */
   private updateBoarding(vehicle: SandboxVehicle, dt: number) {
     const character = this.character!;
@@ -661,9 +670,10 @@ export class MovementSandbox {
         root.rotation.y = turnToward(root.rotation.y, Math.atan2(to.x, to.z), dt);
         character.play('walk');
       } else {
-        root.position.set(door.x, 0, door.z);
+        root.position.set(door.x, root.position.y, door.z);
+        this.speed = 0;
         if (saddle) {
-          this.startSitting(vehicle);
+          this.boardNow(vehicle);
         } else {
           this.boarding = { phase: 'opening', left: Math.min(character.duration('interact'), DOOR_OPEN_SECONDS) };
           character.play('interact', { restart: true });
@@ -674,30 +684,20 @@ export class MovementSandbox {
       const facing = Math.atan2(-Math.cos(door.heading), Math.sin(door.heading));
       root.rotation.y = turnToward(root.rotation.y, facing, dt);
       board.left -= dt;
-      if (board.left <= 0) this.startSitting(vehicle);
+      if (board.left <= 0) this.boarding = { phase: 'vanishing', t: 0 };
     } else {
-      board.t = Math.min(board.duration, board.t + dt);
-      const k = smoothstep(board.t / board.duration);
-      if (board.phase === 'sitting') {
-        // Step into the door opening while sitting down, then the car takes over.
-        root.position.copyFrom(Vector3.Lerp(board.from, this.doorwayWorld(vehicle), k));
-        root.rotation.y = lerpAngle(board.fromHeading, vehicle.heading, k);
-        if (board.t >= board.duration) {
-          this.attachDriver(vehicle);
+      board.t = Math.min(BOARD_FADE_SECONDS, board.t + dt);
+      const k = board.t / BOARD_FADE_SECONDS;
+      this.setCharacterFade(board.phase === 'vanishing' ? 1 - k : k);
+      if (board.t >= BOARD_FADE_SECONDS) {
+        if (board.phase === 'vanishing') {
+          this.boardNow(vehicle);
+        } else {
           this.boarding = undefined;
-          this.driving = true;
-          this.camera.radius = Math.max(this.camera.radius, DRIVING_CAMERA_RADIUS);
-        }
-      } else {
-        root.position.copyFrom(Vector3.Lerp(board.from, new Vector3(door.x, 0, door.z), k));
-        root.rotation.y = lerpAngle(board.fromHeading, door.heading, k);
-        if (board.t >= board.duration) {
           vehicle.setWalkerEnabled(true);
           vehicle.placeWalker(root.position);
-          this.boarding = undefined;
           this.grounded = true;
           this.velocityY = 0;
-          character.play('idle');
         }
       }
     }
@@ -705,47 +705,42 @@ export class MovementSandbox {
     this.camera.target.copyFrom(Vector3.Lerp(this.camera.target, target, 1 - Math.exp(-10 * dt)));
   }
 
-  private startSitting(vehicle: SandboxVehicle) {
-    const character = this.character!;
-    const duration = Math.min(Math.max(character.duration('sitDown'), 0.6), 1.2);
-    this.boarding = {
-      phase: 'sitting',
-      t: 0,
-      duration,
-      from: character.root.position.clone(),
-      fromHeading: character.root.rotation.y,
-    };
-    character.play('sitDown', { restart: true, then: 'driving' });
-    this.speed = 0;
-    // Hold the car still while someone climbs in.
-    vehicle.input.throttle = 0;
+  /** In the seat and driving. */
+  private boardNow(vehicle: SandboxVehicle) {
+    this.attachDriver(vehicle);
+    this.setCharacterFade(1);
+    this.boarding = undefined;
+    this.driving = true;
+    this.camera.radius = Math.max(this.camera.radius, DRIVING_CAMERA_RADIUS);
   }
 
-  /** Where the character's origin goes when seated, in world space. */
-  /** Halfway into the driver's door, on the ground. */
-  private doorwayWorld(vehicle: SandboxVehicle): Vector3 {
-    const door = vehicle.exitPoint();
-    const seat = this.seatWorld(vehicle);
-    return Vector3.Lerp(new Vector3(door.x, 0, door.z), new Vector3(seat.x, 0, seat.z), 0.45);
+  /** Fades the whole character (body and hair) in or out: 1 is solid, 0 is gone. */
+  private setCharacterFade(visibility: number) {
+    for (const mesh of this.character?.root.getChildMeshes(false) ?? []) mesh.visibility = visibility;
   }
 
-  private seatWorld(vehicle: SandboxVehicle): Vector3 {
-    return Vector3.TransformCoordinates(this.seatedOrigin(vehicle), vehicle.root!.getWorldMatrix());
+  /** Ground height under a point (top of whatever solid thing is there), metres. */
+  private groundAt(x: number, z: number, fallback: number): number {
+    const drop = this.vehicle?.castStatic(new Vector3(x, fallback + 2, z), new Vector3(0, -1, 0), 6);
+    return drop === undefined ? fallback : fallback + 2 - drop;
   }
 
   private exitVehicle() {
     if (!this.vehicle || !this.character) return;
+    const vehicle = this.vehicle;
     const root = this.character.root;
+    const carY = root.getAbsolutePosition().y;
     this.detachDriver();
-    // Reappear in the door opening and stand up out of it.
-    const world = this.doorwayWorld(this.vehicle);
-    root.position.copyFrom(world);
-    root.rotation.set(0, this.vehicle.heading, 0);
+    // Fade in standing beside the door, facing the way the car faces.
+    const door = vehicle.exitPoint();
+    root.position.set(door.x, this.groundAt(door.x, door.z, Math.max(0, carY)), door.z);
+    root.rotation.set(0, door.heading, 0);
+    this.setCharacterFade(0);
     root.setEnabled(true);
     this.driving = false;
-    const duration = Math.min(Math.max(this.character.duration('standUp'), 0.6), 1.2);
-    this.boarding = { phase: 'standing', t: 0, duration, from: world, fromHeading: this.vehicle.heading };
-    this.character.play('standUp', { restart: true, then: 'idle' });
+    this.speed = 0;
+    this.boarding = { phase: 'appearing', t: 0 };
+    this.character.play('idle');
   }
 
   private jump() {
@@ -860,14 +855,7 @@ function referenceBlock(ref: (typeof REFERENCES)[number]) {
   return { x: ref.x, z: ref.z, width: size.length, depth: size.width, height: size.height };
 }
 
-function smoothstep(t: number) {
-  const x = Math.min(1, Math.max(0, t));
-  return x * x * (3 - 2 * x);
-}
 
-function lerpAngle(from: number, to: number, t: number) {
-  return from + Math.atan2(Math.sin(to - from), Math.cos(to - from)) * t;
-}
 
 function turnToward(from: number, to: number, dt: number) {
   const delta = Math.atan2(Math.sin(to - from), Math.cos(to - from));
