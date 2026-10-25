@@ -1,0 +1,11 @@
+# Created by Kenney (www.kenney.nl)
+
+newmtl pink
+  Kd 1.00 0.25 0.28
+
+newmtl greyLight
+  Kd 0.69 0.80 0.90
+
+newmtl _defaultMat
+  Kd 1.00 1.00 1.00
+

@@ -1,0 +1,5 @@
+# Created by Kenney (www.kenney.nl)
+
+newmtl greyLight
+  Kd 0.69 0.80 0.90
+

@@ -1,0 +1,8 @@
+# Created by Kenney (www.kenney.nl)
+
+newmtl _defaultMat
+  Kd 1.00 1.00 1.00
+
+newmtl greyLight
+  Kd 0.69 0.80 0.90
+

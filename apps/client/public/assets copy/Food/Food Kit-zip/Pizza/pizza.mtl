@@ -1,0 +1,17 @@
+# Created by Kenney (www.kenney.nl)
+
+newmtl brown
+  Kd 1.00 0.44 0.21
+
+newmtl yellow
+  Kd 1.00 0.61 0.11
+
+newmtl brownDarkest
+  Kd 0.05 0.02 0.01
+
+newmtl red
+  Kd 0.81 0.09 0.08
+
+newmtl green
+  Kd 0.15 0.71 0.45
+
