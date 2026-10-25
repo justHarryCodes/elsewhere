@@ -5,32 +5,21 @@
  */
 import type RAPIER from "@dimforge/rapier3d-compat";
 import { RULES, step, isGrounded, type Sim, type Vec3 } from "./physics-core";
-import { DAMAGE, PLAYER, WATER_DENSITY } from "./physics-config";
+import { ALL_LAYERS as ALL, DAMAGE, LAYER, PLAYER, WATER_DENSITY, groups } from "./physics-config";
 import { HUMAN_METRICS } from "./scale";
+import { detachVehicle, stepVehicles } from "./physics-vehicle";
 
 // DAMAGE rules live in physics-config.ts (fall height is derived from your GRAVITY).
-export { DAMAGE };
+// Collision layers live there too, so physics-vehicle.ts can use them without a circular import.
+export { DAMAGE, LAYER, groups };
 
 // ------------------------------------------------------------------ COLLISION LAYERS
-export const LAYER = {
-  STATIC: 1,
-  DYNAMIC: 2,
-  PLAYER: 4,
-  PROJECTILE: 8,
-  TRIGGER: 16,
-  DEBRIS: 32,
-} as const;
-const ALL = 0xffff;
-
-/** Rapier packs "I am in these layers" (high 16 bits) and "I collide with these" (low 16 bits). */
-export const groups = (member: number, filter: number): number =>
-  (((member & 0xffff) << 16) | (filter & 0xffff)) >>> 0;
-
 export const KIND_GROUPS: Record<string, number> = {
   static: groups(LAYER.STATIC, ALL),
   dynamic: groups(LAYER.DYNAMIC, ALL),
   player: groups(LAYER.PLAYER, ALL),
   kinplayer: groups(LAYER.PLAYER, ALL),
+  vehicle: groups(LAYER.DYNAMIC, ALL),
   projectile: groups(
     LAYER.PROJECTILE,
     LAYER.STATIC | LAYER.DYNAMIC | LAYER.PLAYER,
@@ -128,6 +117,7 @@ function processEvents(sim: Sim, h: PhysicsHandlers): void {
 function updateFallDamage(sim: Sim, h: PhysicsHandlers): void {
   for (const [id, e] of sim.bodies) {
     if (e.kind !== "player" && e.kind !== "kinplayer") continue;
+    if (e.inVehicle) continue; // seated: the vehicle carries them
     const grounded =
       e.kind === "player" ? isGrounded(sim, e.body) : (e.grounded ?? false);
     const st = sim.fallState.get(id) ?? { vy: 0, grounded: true };
@@ -256,6 +246,7 @@ function cleanupProjectiles(sim: Sim): void {
 export function removeEntity(sim: Sim, id: string): void {
   const e = sim.bodies.get(id);
   if (!e) return;
+  detachVehicle(sim, id);
   for (let i = 0; i < e.body.numColliders(); i++) {
     sim.colliderToId.delete(e.body.collider(i).handle);
   }
@@ -408,6 +399,7 @@ export function stepAll(
   { waterY }: StepOptions = {},
 ): void {
   stepKinematicPlayers(sim);
+  stepVehicles(sim); // engine, brakes, steering and suspension rays, before the solver
   if (waterY !== undefined) applyBuoyancy(sim, waterY);
   step(sim); // gravity, drag, player input, solver, speed caps
   processEvents(sim, handlers);

@@ -2,9 +2,12 @@ import { useEffect, useMemo, useRef, useState } from 'react';
 import {
   HUMAN_ANIMATIONS,
   HUMAN_BODIES,
+  VEHICLE_MODELS,
   type AnimationLibrary,
+  type HeadlightMode,
   type HumanAnimation,
   type HumanBody,
+  type VehicleModelKey,
 } from '@game/shared';
 import { type MoveMode, MovementSandbox, type SandboxStats } from './movementSandbox';
 
@@ -16,6 +19,10 @@ const LIBRARY_LABELS: Record<AnimationLibrary, string> = {
 };
 const MOVE_MODES: MoveMode[] = ['walk', 'jog', 'sprint'];
 const SPEED_RATIOS = [0.25, 0.5, 1, 1.5, 2];
+const VEHICLES = Object.entries(VEHICLE_MODELS) as [VehicleModelKey, (typeof VEHICLE_MODELS)[VehicleModelKey]][];
+const HEADLIGHT_MODES: HeadlightMode[] = ['off', 'low', 'high'];
+// Common car paints: white, silver, black, red, blue, yellow, green, orange.
+const PAINTS = ['#f1f5f9', '#94a3b8', '#111827', '#dc2626', '#2563eb', '#facc15', '#15803d', '#ea580c'];
 
 export function SandboxPage() {
   const canvasRef = useRef<HTMLCanvasElement>(null);
@@ -28,6 +35,8 @@ export function SandboxPage() {
   useEffect(() => {
     const sandbox = new MovementSandbox(canvasRef.current!);
     sandboxRef.current = sandbox;
+    // Handy in the browser console during development: sandbox.setNight(true), sandbox.toggleVehicle()...
+    if (import.meta.env.DEV) Object.assign(window, { sandbox });
     const interval = window.setInterval(() => setStats(sandbox.getStats()), 100);
     return () => {
       window.clearInterval(interval);
@@ -54,6 +63,35 @@ export function SandboxPage() {
       )}
       {stats?.error && (
         <div className="absolute inset-x-0 top-0 bg-red-600 px-4 py-2 text-sm">Failed to load assets: {stats.error}</div>
+      )}
+      {stats?.vehicleError && (
+        <div className="absolute inset-x-0 bottom-0 bg-red-600 px-4 py-2 text-sm">
+          Failed to load the car or physics: {stats.vehicleError}
+        </div>
+      )}
+
+      {stats?.nearVehicle && (
+        <div className="pointer-events-none absolute bottom-8 left-1/2 -translate-x-1/2 rounded-lg bg-slate-950/80 px-4 py-2 text-sm">
+          Press <kbd className="rounded bg-slate-700 px-1.5 py-0.5 font-mono">E</kbd> to drive
+        </div>
+      )}
+
+      {stats?.driving && stats.vehicle && (
+        <div className="pointer-events-none absolute right-6 bottom-6 flex items-end gap-4 rounded-xl bg-slate-950/80 px-5 py-4">
+          <div className="text-right">
+            <div className="font-mono text-5xl leading-none font-semibold tabular-nums">
+              {stats.vehicle.speedKmh.toFixed(0)}
+            </div>
+            <div className="text-xs text-slate-400">km/h</div>
+          </div>
+          <div className="flex flex-col items-center gap-1 font-mono text-sm">
+            <span className="text-2xl font-semibold text-emerald-300">{stats.vehicle.gear}</span>
+            <span className={stats.vehicle.braking ? 'text-red-400' : 'text-slate-600'}>BRK</span>
+            <span className={stats.vehicle.headlights !== 'off' ? 'text-amber-200' : 'text-slate-600'}>
+              {stats.vehicle.headlights === 'high' ? 'HI' : 'LO'}
+            </span>
+          </div>
+        </div>
       )}
 
       <aside className="absolute top-0 left-0 flex h-full w-80 max-w-[85vw] flex-col gap-3 overflow-hidden bg-slate-950/85 p-4 text-sm backdrop-blur">
@@ -127,6 +165,107 @@ export function SandboxPage() {
           </button>
         </div>
 
+        <section className="flex flex-col gap-2 rounded-lg bg-slate-900 p-3">
+          <header className="flex items-center justify-between">
+            <h2 className="text-xs font-semibold tracking-wide text-slate-400 uppercase">Vehicle</h2>
+            <span className="text-xs text-slate-400">
+              {!stats?.vehicle ? 'Loading…' : stats.driving ? 'Driving · E to get out' : 'Walk up and press E'}
+            </span>
+          </header>
+
+          <div className="flex gap-2">
+            <select
+              id="vehicle-model"
+              value={stats?.vehicle?.model ?? 'policeCar'}
+              disabled={!stats?.vehicle}
+              onChange={(event) => {
+                sandbox()?.setVehicleModel(event.target.value as VehicleModelKey);
+                event.currentTarget.blur();
+              }}
+              className="min-w-0 flex-1 rounded-md bg-slate-800 px-2 py-1 outline-none focus:ring-2 focus:ring-indigo-500"
+            >
+              {VEHICLES.map(([key, { label }]) => (
+                <option key={key} value={key}>
+                  {label}
+                </option>
+              ))}
+            </select>
+            <button
+              type="button"
+              disabled={!stats?.vehicle}
+              onClick={(event) => {
+                sandbox()?.respawnVehicle();
+                event.currentTarget.blur();
+              }}
+              className="rounded-md bg-slate-800 px-3 py-1 hover:bg-slate-700"
+              title="Put the car back on its wheels"
+            >
+              Respawn
+            </button>
+          </div>
+
+          <div className="flex items-center gap-1.5">
+            {PAINTS.map((paint) => (
+              <button
+                key={paint}
+                type="button"
+                aria-label={`Paint ${paint}`}
+                onClick={(event) => {
+                  sandbox()?.setVehiclePaint(paint);
+                  event.currentTarget.blur();
+                }}
+                className={`h-6 w-6 rounded-full border-2 ${
+                  stats?.vehicle?.paint === paint ? 'border-indigo-400' : 'border-slate-700'
+                }`}
+                style={{ backgroundColor: paint }}
+              />
+            ))}
+            <input
+              id="vehicle-paint"
+              type="color"
+              value={stats?.vehicle?.paint ?? '#ffffff'}
+              onChange={(event) => sandbox()?.setVehiclePaint(event.target.value)}
+              className="h-6 w-8 cursor-pointer rounded bg-transparent"
+              title="Any colour"
+            />
+          </div>
+
+          <Segmented
+            label="Headlights (L)"
+            options={HEADLIGHT_MODES}
+            value={stats?.vehicle?.headlights}
+            onChange={(mode) => sandbox()?.setHeadlights(mode)}
+          />
+
+          <div className="flex items-center justify-between">
+            <label className={`flex items-center gap-2 ${stats?.vehicle?.hasSiren ? '' : 'text-slate-500'}`}>
+              <input
+                id="vehicle-siren"
+                type="checkbox"
+                checked={stats?.vehicle?.siren ?? false}
+                disabled={!stats?.vehicle?.hasSiren}
+                onChange={(event) => {
+                  sandbox()?.setSiren(event.target.checked);
+                  event.currentTarget.blur();
+                }}
+              />
+              Siren (K)
+            </label>
+            <label className="flex items-center gap-2">
+              <input
+                id="sandbox-night"
+                type="checkbox"
+                checked={stats?.night ?? false}
+                onChange={(event) => {
+                  sandbox()?.setNight(event.target.checked);
+                  event.currentTarget.blur();
+                }}
+              />
+              Night (N)
+            </label>
+          </div>
+        </section>
+
         <section className="flex min-h-0 flex-1 flex-col gap-2">
           <input
             value={query}
@@ -169,7 +308,7 @@ export function SandboxPage() {
 
         <footer className="text-xs leading-relaxed text-slate-400">
           WASD / arrows move (camera-relative) · Shift sprint · C walk toggle · Space jump · drag to orbit ·
-          wheel to zoom
+          wheel to zoom · In the car: W/S throttle and brake (hold S to reverse) · A/D steer · Space handbrake
         </footer>
       </aside>
     </div>

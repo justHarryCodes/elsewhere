@@ -107,6 +107,43 @@ export function frontalArea(target: SizeKey | RealSize): number {
   return s.width * s.height * 0.8;
 }
 
+// ---------------------------------------------------------------- collision layers
+export const LAYER = {
+  STATIC: 1,
+  DYNAMIC: 2,
+  PLAYER: 4,
+  PROJECTILE: 8,
+  TRIGGER: 16,
+  DEBRIS: 32,
+} as const;
+export const ALL_LAYERS = 0xffff;
+
+/** Rapier packs "I am in these layers" (high 16 bits) and "I collide with these" (low 16 bits). */
+export const groups = (member: number, filter: number): number =>
+  (((member & 0xffff) << 16) | (filter & 0xffff)) >>> 0;
+
+// ---------------------------------------------------------------- vehicles (tuning shared by every model)
+// Per-model handling (power, brakes, steering, grip) lives with the model in vehicles.ts.
+export const VEHICLE = {
+  /** Suspension spring per unit of chassis mass (Rapier/Bullet convention): sag = g / (4 * k). */
+  suspensionStiffness: 40,
+  suspensionCompression: 2.4, // damping while the spring compresses
+  suspensionRelaxation: 3.2, // damping while it extends
+  suspensionTravel: 0.18, // metres of travel either side of rest
+  // Base friction slip (Rapier's max tyre impulse per unit of wheel load), multiplied by model grip
+  // and the ground's friction. Too low and cars slide out of every fast corner.
+  tireFriction: 4,
+  handbrakeRearGrip: 0.35, // rear grip fraction while the handbrake is on
+  brakeFrontBias: 0.65, // share of braking on the front axle; even braking locks the rear and spins the car
+  rollingResistance: 0.015, // coasting drag as a fraction of weight
+  steerRate: 2.5, // how fast steering input reaches full lock, per second
+  steerFadeSpeed: 0.4, // fraction of top speed at which steering has narrowed to minSteerDeg
+  enterDistance: 2.5, // metres from the body's edge a player may get in
+  // Centre of mass below the body's middle, as a fraction of body height. Raycast cars need it low
+  // (near the axles) or weight transfer under braking lifts the rear and spins them.
+  centreOfMassDrop: 0.6,
+} as const;
+
 // ---------------------------------------------------------------- damage (new, tune freely)
 const FALL_SAFE_HEIGHT = 3; // metres you can drop for free
 export const DAMAGE = {

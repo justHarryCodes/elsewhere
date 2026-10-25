@@ -12,7 +12,7 @@ export default defineConfig({
   },
   // @game/shared is a linked CommonJS workspace package, so Vite must pre-bundle it.
   optimizeDeps: {
-    include: ['@game/shared'],
+    include: ['@game/shared', '@game/shared/physics'],
   },
   build: {
     commonjsOptions: {

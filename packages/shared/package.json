@@ -11,5 +11,18 @@
   },
   "devDependencies": {
     "typescript": "^5.8.3"
+  },
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "default": "./dist/index.js"
+    },
+    "./physics": {
+      "types": "./dist/physics.d.ts",
+      "default": "./dist/physics.js"
+    }
+  },
+  "dependencies": {
+    "@dimforge/rapier3d-compat": "^0.21.0"
   }
 }

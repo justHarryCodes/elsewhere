@@ -9,6 +9,7 @@ import * as C from "./physics-config";
 import { GRAVITY } from "./physics-config";
 import type { MaterialName, SurfaceName } from "./physics-config";
 import { sizeInUnits, type SizeKey } from "./scale";
+import type { VehicleState } from "./physics-vehicle";
 
 // ------------------------------------------------------------------ TYPES
 export type Vec3 = { x: number; y: number; z: number };
@@ -18,7 +19,8 @@ export type BodyKind =
   | "dynamic"
   | "player" // dynamic capsule driven by impulses
   | "kinplayer" // kinematic capsule with slope/stair controller
-  | "projectile";
+  | "projectile"
+  | "vehicle"; // dynamic chassis on raycast wheels (physics-vehicle.ts)
 
 export interface PlayerInput {
   x: number; // -1..1 strafe
@@ -47,6 +49,9 @@ export interface Entity {
   expiresTick?: number;
   // triggers
   trigger?: boolean;
+  // vehicles (see physics-vehicle.ts)
+  vehicle?: VehicleState;
+  inVehicle?: string; // id of the vehicle a player is driving
 }
 
 export interface Sim {
@@ -95,8 +100,14 @@ export const RULES = {
 } as const;
 
 // ------------------------------------------------------------------ WORLD
+// RAPIER.init() instantiates the WebAssembly module. Two overlapping calls (e.g. React mounting a
+// component twice in development) can each instantiate it, and objects from the first then crash
+// with "recursive use of an object". Initialise once and share the promise.
+let rapierReady: Promise<void> | undefined;
+
 export async function createWorld(): Promise<Sim> {
-  await RAPIER.init();
+  rapierReady ??= RAPIER.init();
+  await rapierReady;
   const world = new RAPIER.World({ x: 0, y: RULES.GRAVITY, z: 0 });
   world.timestep = RULES.DT;
   return {
@@ -319,7 +330,7 @@ export function step(sim: Sim): void {
   }
   sim.world.step(sim.events); // sim.events is set by enablePhysicsEvents() in physics-extras.ts
   for (const e of sim.bodies.values()) {
-    if (e.kind === "dynamic" || e.kind === "player") clampSpeed(e);
+    if (e.kind === "dynamic" || e.kind === "player" || e.kind === "vehicle") clampSpeed(e);
   }
   sim.tick++;
 }

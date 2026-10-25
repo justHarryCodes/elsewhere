@@ -5,6 +5,7 @@ import { HUMAN_METRICS } from './scale';
 
 export * from './humans';
 export * from './scale';
+export * from './vehicles';
 
 export const ROOM_NAME = 'game';
 export const SERVER_PORT = 3000;

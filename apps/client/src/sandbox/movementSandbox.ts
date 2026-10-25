@@ -5,6 +5,7 @@ import {
   DirectionalLight,
   DynamicTexture,
   Engine,
+  GlowLayer,
   HemisphericLight,
   Mesh,
   MeshBuilder,
@@ -19,12 +20,15 @@ import {
   HUMAN_METRICS,
   locomotionForSpeed,
   sizeInUnits,
+  type HeadlightMode,
   type HumanAnimation,
   type HumanBody,
   type SizeKey,
+  type VehicleModelKey,
 } from '@game/shared';
 import { type HumanCharacter, HumanLibrary } from '../game/babylon/humans';
 import { measureNode } from '../game/babylon/realScale';
+import { SandboxVehicle, type VehicleStats } from './sandboxVehicle';
 
 export type MoveMode = 'walk' | 'jog' | 'sprint';
 
@@ -40,6 +44,13 @@ export interface SandboxStats {
   headingDeg: number;
   heightMeters: number;
   fps: number;
+  /** Undefined until the physics engine and car have loaded. */
+  vehicle?: VehicleStats;
+  vehicleError?: string;
+  driving: boolean;
+  /** Close enough to the car to get in with E. */
+  nearVehicle: boolean;
+  night: boolean;
 }
 
 const MOVE_SPEEDS: Record<MoveMode, number> = {
@@ -54,8 +65,13 @@ const KEYS = {
   left: ['KeyA', 'ArrowLeft'],
   right: ['KeyD', 'ArrowRight'],
 };
-const GROUND_SIZE = 60;
+const GROUND_SIZE = 200;
 const CAMERA_TARGET_HEIGHT = 1.1;
+const DRIVING_CAMERA_RADIUS = 9;
+const ENTER_DISTANCE = 1.5; // metres from the car's outline to get in
+
+const DAY = { sky: new Color4(0.55, 0.7, 0.85, 1), hemi: 0.7, sun: 1.6, ground: new Color3(0.42, 0.5, 0.42) };
+const NIGHT = { sky: new Color4(0.02, 0.03, 0.07, 1), hemi: 0.06, sun: 0.04, ground: new Color3(0.3, 0.33, 0.36) };
 
 // Real-size props from the scale catalog, placed around the spawn to judge proportions.
 const REFERENCES: { key: SizeKey; label: string; x: number; z: number; color: string }[] = [
@@ -90,6 +106,14 @@ export class MovementSandbox {
   private speedRatio = 1;
   private error?: string;
 
+  private readonly hemi: HemisphericLight;
+  private readonly sun: DirectionalLight;
+  private groundMaterial?: StandardMaterial;
+  private vehicle?: SandboxVehicle;
+  private vehicleError?: string;
+  private driving = false;
+  private night = false;
+
   constructor(canvas: HTMLCanvasElement) {
     this.engine = new Engine(canvas, true);
     this.scene = new Scene(this.engine);
@@ -105,16 +129,30 @@ export class MovementSandbox {
     this.camera.inputs.removeByType('ArcRotateCameraKeyboardMoveInput');
     this.camera.attachControl(canvas, true);
 
-    const hemi = new HemisphericLight('hemi', new Vector3(0, 1, 0), this.scene);
-    hemi.intensity = 0.7;
-    const sun = new DirectionalLight('sun', new Vector3(-0.4, -1, -0.6), this.scene);
-    sun.position = new Vector3(20, 40, 30);
-    sun.intensity = 1.6;
-    this.shadows = new ShadowGenerator(2048, sun);
+    this.hemi = new HemisphericLight('hemi', new Vector3(0, 1, 0), this.scene);
+    this.hemi.intensity = DAY.hemi;
+    this.sun = new DirectionalLight('sun', new Vector3(-0.4, -1, -0.6), this.scene);
+    this.sun.position = new Vector3(20, 40, 30);
+    this.sun.intensity = DAY.sun;
+    this.shadows = new ShadowGenerator(2048, this.sun);
     this.shadows.useBlurExponentialShadowMap = true;
+    // Lamps glow through their emissive colour; this layer adds the bloom around them.
+    const glow = new GlowLayer('glow', this.scene, { blurKernelSize: 48 });
+    glow.intensity = 0.9;
 
     this.createGround();
     this.createReferences();
+
+    SandboxVehicle.create(this.scene, this.shadows, REFERENCES.map(referenceBlock))
+      .then((vehicle) => {
+        if (this.disposed) vehicle.dispose();
+        else this.vehicle = vehicle;
+      })
+      .catch((error: unknown) => {
+        if (this.disposed) return; // the scene went away mid-load; nothing to report
+        console.error('Failed to load the vehicle sandbox', error);
+        this.vehicleError = error instanceof Error ? error.message : String(error);
+      });
 
     this.scene.onBeforeRenderObservable.add(() => this.update(this.engine.getDeltaTime() / 1000));
     this.engine.runRenderLoop(() => this.scene.render());
@@ -164,9 +202,47 @@ export class MovementSandbox {
 
   resetPosition() {
     if (!this.character) return;
+    if (this.driving) this.exitVehicle();
     this.character.root.position.set(0, 0, 0);
     this.velocityY = 0;
     this.grounded = true;
+  }
+
+  setVehicleModel(model: VehicleModelKey) {
+    void this.vehicle?.setModel(model);
+  }
+
+  setVehiclePaint(hex: string) {
+    this.vehicle?.setPaint(hex);
+  }
+
+  setHeadlights(mode: HeadlightMode) {
+    this.vehicle?.setHeadlights(mode);
+  }
+
+  setSiren(on: boolean) {
+    this.vehicle?.setSiren(on);
+  }
+
+  respawnVehicle() {
+    void this.vehicle?.respawn();
+  }
+
+  setNight(night: boolean) {
+    this.night = night;
+    const look = night ? NIGHT : DAY;
+    this.scene.clearColor = look.sky;
+    this.hemi.intensity = look.hemi;
+    this.sun.intensity = look.sun;
+    this.groundMaterial?.diffuseColor.copyFrom(look.ground);
+    // Nobody drives at night with the lights off.
+    if (night && this.vehicle?.getStats(this.driving).headlights === 'off') this.vehicle.setHeadlights('low');
+  }
+
+  /** Gets in when close to the car, out when driving. */
+  toggleVehicle() {
+    if (this.driving) this.exitVehicle();
+    else if (this.isNearVehicle()) this.enterVehicle();
   }
 
   getStats(): SandboxStats {
@@ -183,6 +259,11 @@ export class MovementSandbox {
       headingDeg: root ? ((root.rotation.y * 180) / Math.PI + 360) % 360 : 0,
       heightMeters: this.heightMeters,
       fps: this.engine.getFps(),
+      vehicle: this.vehicle?.getStats(this.driving),
+      vehicleError: this.vehicleError,
+      driving: this.driving,
+      nearVehicle: !this.driving && this.isNearVehicle(),
+      night: this.night,
     };
   }
 
@@ -192,6 +273,7 @@ export class MovementSandbox {
     window.removeEventListener('keyup', this.onKeyUp);
     window.removeEventListener('blur', this.onBlur);
     window.removeEventListener('resize', this.onResize);
+    this.vehicle?.dispose();
     this.engine.dispose();
   }
 
@@ -214,6 +296,19 @@ export class MovementSandbox {
   }
 
   private update(dt: number) {
+    const vehicle = this.vehicle;
+    if (vehicle) {
+      const input = this.readInput();
+      vehicle.input.throttle = this.driving ? input.forward : 0;
+      vehicle.input.steer = this.driving ? input.right : 0;
+      vehicle.input.handbrake = this.driving && this.keys.has('Space');
+      vehicle.update(dt);
+      if (this.driving) {
+        this.followVehicle(vehicle, dt);
+        return;
+      }
+    }
+
     const character = this.character;
     if (!character) return;
     const root = character.root;
@@ -260,6 +355,47 @@ export class MovementSandbox {
     this.camera.target = Vector3.Lerp(this.camera.target, target, 1 - Math.exp(-10 * dt));
   }
 
+  // Chase camera: target rides with the car and the orbit swings round behind it. Mouse drag still
+  // works; the camera eases back behind the car afterwards.
+  private followVehicle(vehicle: SandboxVehicle, dt: number) {
+    const root = vehicle.root;
+    if (!root) return;
+    const target = root.position.add(new Vector3(0, CAMERA_TARGET_HEIGHT, 0));
+    // Move the target in place: assigning camera.target keeps the camera where it is and shrinks
+    // the orbit radius as the car pulls away; in place keeps the radius and moves the camera.
+    this.camera.target.copyFrom(Vector3.Lerp(this.camera.target, target, 1 - Math.exp(-12 * dt)));
+    const heading = vehicle.heading;
+    const behind = Math.atan2(-Math.cos(heading), -Math.sin(heading));
+    const delta = Math.atan2(Math.sin(behind - this.camera.alpha), Math.cos(behind - this.camera.alpha));
+    this.camera.alpha += delta * (1 - Math.exp(-2.5 * dt));
+  }
+
+  private isNearVehicle(): boolean {
+    const root = this.character?.root;
+    return !!root && !!this.vehicle && this.vehicle.distanceTo(root.position) < ENTER_DISTANCE;
+  }
+
+  private enterVehicle() {
+    if (!this.vehicle || !this.character) return;
+    this.driving = true;
+    this.speed = 0;
+    this.character.root.setEnabled(false);
+    this.camera.radius = Math.max(this.camera.radius, DRIVING_CAMERA_RADIUS);
+  }
+
+  private exitVehicle() {
+    if (!this.vehicle || !this.character) return;
+    this.driving = false;
+    const { x, z, heading } = this.vehicle.exitPoint();
+    const root = this.character.root;
+    root.position.set(x, 0, z);
+    root.rotation.y = heading;
+    root.setEnabled(true);
+    this.grounded = true;
+    this.velocityY = 0;
+    this.character.play('idle');
+  }
+
   private jump() {
     if (!this.character || !this.grounded) return;
     this.grounded = false;
@@ -279,8 +415,15 @@ export class MovementSandbox {
     if (isTyping(event)) return;
     if (event.code === 'Space') {
       event.preventDefault();
-      if (!event.repeat) this.jump();
+      if (this.driving) this.keys.add(event.code); // handbrake while held
+      else if (!event.repeat) this.jump();
       return;
+    }
+    if (!event.repeat) {
+      if (event.code === 'KeyE') this.toggleVehicle();
+      if (event.code === 'KeyL') this.vehicle?.cycleHeadlights();
+      if (event.code === 'KeyK') this.vehicle?.setSiren(!this.vehicle.getStats(this.driving).siren);
+      if (event.code === 'KeyN') this.setNight(!this.night);
     }
     this.keys.add(event.code);
     if (event.code === 'ShiftLeft' || event.code === 'ShiftRight') this.moveMode = 'sprint';
@@ -298,9 +441,10 @@ export class MovementSandbox {
   private createGround() {
     const ground = MeshBuilder.CreateGround('ground', { width: GROUND_SIZE, height: GROUND_SIZE }, this.scene);
     const material = new StandardMaterial('ground-mat', this.scene);
-    material.diffuseColor = new Color3(0.42, 0.5, 0.42);
+    material.diffuseColor = DAY.ground.clone();
     material.specularColor = Color3.Black();
     ground.material = material;
+    this.groundMaterial = material;
     ground.receiveShadows = true;
 
     // 1 m grid, every 5th line brighter, so distances can be read off the ground.
@@ -355,6 +499,12 @@ export class MovementSandbox {
     plane.billboardMode = Mesh.BILLBOARDMODE_ALL;
     return plane;
   }
+}
+
+// The reference boxes are solid for the car: same footprint as the drawn box (length along X).
+function referenceBlock(ref: (typeof REFERENCES)[number]) {
+  const size = sizeInUnits(ref.key);
+  return { x: ref.x, z: ref.z, width: size.length, depth: size.width, height: size.height };
 }
 
 function turnToward(from: number, to: number, dt: number) {

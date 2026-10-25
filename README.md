@@ -50,6 +50,18 @@ The header toggle switches between the Babylon.js and Three.js renderers.
 - Server sets `animation` from movement speed; clients send `Messages.Action` for emotes/attacks (keys 1-5).
 - Renderers: `game/babylon/humans.ts` and `game/three/humans.ts` (`HumanLibrary.load()` then `createHuman()`).
 
+## Vehicles
+
+- `packages/shared/src/vehicles.ts` defines each drivable car: model file, real-world size, which nodes are
+  wheels, which materials are paint / headlights / tail lights / siren, measured wheel and body bounds, and
+  handling. Six Quaternius cars share one rig (police car, sports car, SUV, taxi, hatchback, sedan).
+- `packages/shared/src/physics-vehicle.ts` drives them on Rapier's raycast vehicle: engine, brakes with front bias,
+  speed-sensitive steering, suspension and tyre grip per surface. Import physics from `@game/shared/physics`.
+- `apps/client/src/game/babylon/vehicles.ts` draws a `VehicleSnapshot`: body pose, steering and spinning wheels,
+  suspension travel, per-car paint, headlights (low/high), brake and reverse lights, and the police siren.
+- Try it in `/sandbox`: walk to the car and press **E**. W/S throttle and brake (hold S to reverse), A/D steer,
+  Space handbrake, **L** headlights, **K** siren, **N** night.
+
 ## Configuration
 
 - Server: `PORT` (default `3000`).
