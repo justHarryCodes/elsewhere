@@ -13,6 +13,7 @@ import {
   type DoorMessage,
   KERB_HEIGHT,
   interiorDoorAt,
+  strayedFromInterior,
   generateCity,
   arrivalAt,
   sidewalkAt,
@@ -71,9 +72,8 @@ export class GameRoom extends Room<GameState> {
         const home = this.city.interiors[this.city.home];
         if (home) to = { x: home.door.x, y: KERB_HEIGHT + 0.05, z: home.door.z, heading: home.door.heading + Math.PI };
       } else {
-        const door = interiorDoorAt(this.city.interiors, player.x, player.y, player.z, 2.6);
-        if (door?.inside) to = { x: door.interior.door.x, y: KERB_HEIGHT + 0.05, z: door.interior.door.z, heading: door.interior.door.heading };
-        else if (door) to = { ...door.interior.entry, y: door.interior.entry.y + 0.05 };
+        // In, out, up to a roof terrace or back down: the doorway says where it leads.
+        to = interiorDoorAt(this.city.interiors, player.x, player.y, player.z, 2.6)?.to;
       }
       if (!to) return;
       entry.walker.body.setTranslation(to, true);
@@ -158,6 +158,13 @@ export class GameRoom extends Room<GameState> {
         z: input.z * PLAYER_SPEED * dt,
       });
       if (grounded && entry.velocityY < 0) entry.velocityY = 0;
+      // Anyone who got out of a building's plan (into the void round it) is back on the street at its door.
+      const back = strayedFromInterior(this.city.interiors, position.x, position.y, position.z);
+      if (back) {
+        entry.walker.body.setTranslation(back, true);
+        entry.velocityY = 0;
+        Object.assign(position, back);
+      }
       if (position.y < FALL_RESET_Y) {
         const spawn = this.spawnPoint();
         entry.walker.body.setTranslation(spawn, true);

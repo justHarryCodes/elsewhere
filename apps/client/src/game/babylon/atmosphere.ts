@@ -75,6 +75,8 @@ const NIGHT: Look = {
 export class Atmosphere {
   readonly pipeline: DefaultRenderingPipeline;
   night = false;
+  /** Inside a building (under the town): the outdoor lights turned down to a room's softer level. */
+  private indoors = false;
   /** A soft light that hangs over the player at night, so they never become a silhouette. */
   private readonly playerLight: PointLight;
   private readonly sky: SkyDome;
@@ -112,6 +114,11 @@ export class Atmosphere {
   /** Keeps the player's light over them; call every frame with their position. */
   follow(position: { x: number; y: number; z: number }) {
     this.playerLight.position.set(position.x + 1, position.y + 3.2, position.z + 1);
+    const indoors = position.y < -5;
+    if (indoors !== this.indoors) {
+      this.indoors = indoors;
+      this.set(this.night);
+    }
   }
 
   set(night: boolean) {
@@ -121,18 +128,20 @@ export class Atmosphere {
     scene.clearColor = look.sky.clone();
     scene.fogColor.set(look.sky.r, look.sky.g, look.sky.b);
     scene.fogDensity = look.fogDensity;
-    this.hemi.intensity = look.hemi;
+    // Indoors, rooms are lit softly: less sky and sun, lower exposure, little bloom.
+    const inside = this.indoors ? { light: 0.55, sun: 0.4, env: 0.4, exposure: 0.8, bloom: 0.4 } : { light: 1, sun: 1, env: 1, exposure: 1, bloom: 1 };
+    this.hemi.intensity = look.hemi * inside.light;
     this.hemi.diffuse = look.hemiSky.clone();
     this.hemi.groundColor = look.hemiGround.clone();
-    this.sun.intensity = look.sun;
+    this.sun.intensity = look.sun * inside.sun;
     this.playerLight.setEnabled(night);
     this.sky.set(night);
     this.sun.diffuse = look.sunColor.clone();
-    scene.environmentIntensity = look.env;
+    scene.environmentIntensity = look.env * inside.env;
     const p = this.pipeline;
-    p.bloomWeight = look.bloomWeight;
+    p.bloomWeight = look.bloomWeight * inside.bloom;
     p.bloomThreshold = look.bloomThreshold;
-    p.imageProcessing.exposure = look.exposure;
+    p.imageProcessing.exposure = look.exposure * inside.exposure;
     p.imageProcessing.contrast = look.contrast;
     p.imageProcessing.vignetteWeight = look.vignette;
     p.chromaticAberration.aberrationAmount = look.aberration;

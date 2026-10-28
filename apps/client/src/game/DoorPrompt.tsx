@@ -14,16 +14,12 @@ export function DoorPrompt({
   player: () => { x: number; y: number; z: number } | undefined;
   onDoor: () => void;
 }) {
-  const [door, setDoor] = useState<{ name: string; inside: boolean } | undefined>();
+  const [door, setDoor] = useState<string | undefined>();
 
   useEffect(() => {
     const timer = window.setInterval(() => {
       const at = player();
-      const found = at && interiorDoorAt(city.interiors, at.x, at.y, at.z);
-      setDoor((previous) => {
-        const next = found && { name: found.interior.name, inside: found.inside };
-        return previous?.name === next?.name && previous?.inside === next?.inside ? previous : next;
-      });
+      setDoor((at && interiorDoorAt(city.interiors, at.x, at.y, at.z)?.label) || undefined);
     }, 200);
     return () => window.clearInterval(timer);
   }, [city, player]);
@@ -42,7 +38,7 @@ export function DoorPrompt({
   return (
     <div className="pointer-events-none absolute bottom-8 left-1/2 z-10 -translate-x-1/2 rounded-lg bg-slate-950/80 px-4 py-2 text-sm">
       Press <kbd className="rounded bg-slate-700 px-1.5 py-0.5 font-mono">E</kbd>{" "}
-      {door.inside ? "to go out" : `to go into ${door.name === "Your home" ? "your home" : door.name}`}
+      {door}
     </div>
   );
 }

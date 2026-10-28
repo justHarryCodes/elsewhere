@@ -40,11 +40,14 @@ import {
   isOpenGround,
   laneAt,
   LANE_WIDTH,
+  LANES_PER_SIDE,
   SIDEWALK_WIDTH,
   STREET_WIDTH,
   nearestSpot,
   type CityInterior,
+  type Doorway,
   interiorDoorAt,
+  strayedFromInterior,
 } from '@game/shared';
 import { Atmosphere } from '../game/babylon/atmosphere';
 import type { CameraView } from '../game/CameraControls';
@@ -80,7 +83,7 @@ export interface SandboxStats {
   /** Close enough to the car to get in with E. */
   nearVehicle: boolean;
   /** At a door you can use with E: going in (outside) or out (inside), and where. */
-  door?: { name: string; inside: boolean };
+  door?: { label: string };
   /** The room the character is in, if any. */
   room?: string;
   night: boolean;
@@ -293,7 +296,7 @@ export class MovementSandbox {
     this.appearance = { ...this.appearance, ...change };
     if (!this.character) return;
     this.character.setAppearance(this.appearance);
-    for (const mesh of this.character.hairMeshes) this.shadows.addShadowCaster(mesh);
+    for (const mesh of [...this.character.hairMeshes, ...this.character.clothMeshes]) this.shadows.addShadowCaster(mesh);
   }
 
   /** Puts the character straight back on their feet beside the car (no animation). */
@@ -369,7 +372,7 @@ export class MovementSandbox {
   navigateTo(x: number, z: number, zone?: CityZone) {
     const spot = nearestSpot(this.city, x, z, zone);
     // From the kerbside lane to the middle of the sidewalk.
-    this.travel(laneAt(spot), STREET_WIDTH / 2 - SIDEWALK_WIDTH / 2 - LANE_WIDTH * 1.5, KERB_HEIGHT);
+    this.travel(laneAt(spot), STREET_WIDTH / 2 - SIDEWALK_WIDTH / 2 - LANE_WIDTH * (LANES_PER_SIDE - 0.5), KERB_HEIGHT);
   }
 
   /**
@@ -579,7 +582,7 @@ export class MovementSandbox {
   toggleVehicle() {
     const door = this.doorHere();
     if (door && !this.isNearVehicle()) {
-      this.useDoor(door.interior, door.inside);
+      this.useDoor(door);
       return;
     }
     if (this.boarding || !this.vehicle || !this.character) return;
@@ -598,27 +601,28 @@ export class MovementSandbox {
   }
 
   /**
-   * In through a building's front door (into its room, under the town, with a doll's-house view) or
-   * back out onto the street in front of it.
+   * Through a doorway: in through a building's front door (into its plan, away under the town, with a
+   * doll's-house view), back out onto the street, up to its roof terrace or back down from it.
    */
-  useDoor(interior: CityInterior, inside: boolean) {
+  useDoor(doorway: Doorway) {
     const root = this.character?.root;
     if (!root) return;
     const camera = this.camera;
-    if (inside) {
-      root.position.set(interior.door.x, KERB_HEIGHT + 0.05, interior.door.z);
-      root.rotation.set(0, interior.door.heading, 0);
+    const { to, interior } = doorway;
+    root.position.set(to.x, to.y, to.z);
+    root.rotation.set(0, to.heading, 0);
+    const behind = Math.atan2(-Math.cos(to.heading), -Math.sin(to.heading));
+    if (to.y < -5) {
+      // Inside: looking down into the rooms from behind the character.
+      this.room = { interior, radius: this.room?.radius ?? this.preferredRadius, beta: this.room?.beta ?? camera.beta };
+      camera.upperBetaLimit = ROOM_CAMERA.maxBeta;
+      this.cameraGoal = { radius: ROOM_CAMERA.radius, beta: ROOM_CAMERA.beta, alpha: behind };
+    } else {
       camera.upperBetaLimit = Math.PI / 2 - 0.05;
       if (this.room) this.cameraGoal = { radius: this.room.radius, beta: this.room.beta };
       this.room = undefined;
-    } else {
-      root.position.set(interior.entry.x, interior.entry.y + 0.05, interior.entry.z);
-      root.rotation.set(0, interior.entry.heading, 0);
-      this.room = { interior, radius: this.preferredRadius, beta: camera.beta };
-      camera.upperBetaLimit = ROOM_CAMERA.maxBeta;
-      // Behind the character as they come in, looking down into the room.
-      const heading = interior.entry.heading;
-      this.cameraGoal = { radius: ROOM_CAMERA.radius, beta: ROOM_CAMERA.beta, alpha: Math.atan2(-Math.cos(heading), -Math.sin(heading)) };
+      // Out on a roof terrace: a high view over the town.
+      if (to.y > 3) this.cameraGoal = { radius: 14, beta: 1.05, alpha: behind };
     }
     this.vehicle?.placeWalker(root.position);
     this.velocityY = 0;
@@ -668,7 +672,7 @@ export class MovementSandbox {
       driving: this.driving,
       boarding: !!this.boarding,
       nearVehicle: !this.driving && !this.boarding && this.isNearVehicle(),
-      door: door && !this.isNearVehicle() ? { name: door.interior.name, inside: door.inside } : undefined,
+      door: door && !this.isNearVehicle() ? { label: door.label } : undefined,
       room: this.room?.interior.name,
       night: this.night,
       view: this.view,
@@ -762,6 +766,15 @@ export class MovementSandbox {
     };
     // Without physics (still loading) the ground is y = 0; with it, the colliders decide (rooms are below 0).
     root.position.set(result.position.x, this.vehicle ? result.position.y : Math.max(0, result.position.y), result.position.z);
+    // Out of a building's plan into the void round it: back on the street at its front door.
+    const back = this.vehicle && strayedFromInterior(this.city.interiors, root.position.x, root.position.y, root.position.z);
+    if (back) {
+      this.leaveRoom();
+      root.position.set(back.x, back.y, back.z);
+      root.rotation.set(0, back.heading, 0);
+      this.vehicle?.placeWalker(root.position);
+      this.velocityY = 0;
+    }
     const wasGrounded = this.grounded;
     this.grounded = result.grounded || (!this.vehicle && root.position.y <= 0);
     if (this.grounded && this.velocityY < 0) this.velocityY = 0;

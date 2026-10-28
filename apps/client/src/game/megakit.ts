@@ -1,13 +1,16 @@
 // The city's packed models and the code that welds placed pieces into one batch of triangles per
-// material. Two packs, loaded together: the Downtown City MegaKit (streets, works halls: made by
-// scripts/city/pack_megakit.py) and the town (Ultimate Buildings, Stylized Nature, street props: made by
-// scripts/city/pack_town.py). Renderer-neutral: the Babylon and Three.js city renderers both turn the
-// batches into meshes.
+// material. Three packs, loaded together: the Downtown City MegaKit (ground textures, window rooms: made
+// by scripts/city/pack_megakit.py), the town (Ultimate Buildings, Stylized Nature, street props,
+// furniture: made by scripts/city/pack_town.py) and the Kenney kits (streets, houses, shops, the arcade,
+// skate park, graveyard, monorail, food: made by scripts/city/pack_kenney.mjs). Renderer-neutral: the
+// Babylon and Three.js city renderers both turn the batches into meshes.
 
 import { type CityPiece, roomLook } from '@game/shared';
 
 const BASE = '/assets/city/megakit/';
-const PACKS = ['/assets/city/megakit/', '/assets/city/town/'];
+const PACKS = ['/assets/city/megakit/', '/assets/city/town/', '/assets/city/kenney/'];
+/** Kenney's pattern tiles (wallpaper and floors), by the file names CityShape.pattern uses. */
+export const PATTERN_URL = '/assets/city/kenney/textures/patterns/';
 
 export interface KitMaterial {
   base: string | null;
@@ -88,7 +91,15 @@ export class MegaKit {
     readonly materials: Map<string, KitMaterial>,
   ) {}
 
-  static async load(): Promise<MegaKit> {
+  private static loading?: Promise<MegaKit>;
+
+  /** Loads the packs once; every caller shares the same kit. */
+  static load(): Promise<MegaKit> {
+    MegaKit.loading ??= MegaKit.fetchPacks();
+    return MegaKit.loading;
+  }
+
+  private static async fetchPacks(): Promise<MegaKit> {
     const pieces = new Map<string, KitPiece>();
     const materials = new Map<string, KitMaterial>();
     await Promise.all(

@@ -9,6 +9,9 @@ import {
 import '@babylonjs/loaders/glTF';
 import {
   type City,
+  type CityInterior,
+  type InteriorSpot,
+  interiorAt,
   type Pedestrian,
   TRAFFIC_CAR_KINDS,
   type TrafficCar,
@@ -41,8 +44,32 @@ const WALK_CLIP = 'CharacterArmature|Walk';
 const IDLE_CLIP = 'CharacterArmature|Idle';
 /** Speed (m/s) the walk clip moves at, to match feet to the ground. */
 const WALK_CLIP_SPEED = 1.35;
+/** A second, calmer idle for people standing about (the Interact and Wave clips tip some of these models over). */
+const NEUTRAL_CLIP = 'CharacterArmature|Idle_Neutral';
 const DOG = '/assets/animals/kenney-cube-pets/animal-dog.glb';
 const DOG_HEIGHT = 0.55;
+/** People inside walk at this pace, and there are never more than this many in one building. */
+const INDOOR_PACE = 1.15;
+const INDOOR_MAX = 26;
+/** Homes: nobody else in them. */
+const PRIVATE = new Set(['home', 'house', 'apartment']);
+
+/** Someone inside a building: staff at their post, or a visitor going from room to room. */
+interface Indoor {
+  spot: InteriorSpot;
+  root: TransformNode;
+  clips: Partial<Record<'walk' | 'idle' | 'neutral', AnimationGroup>>;
+  playing?: string;
+  x: number;
+  z: number;
+  heading: number;
+  /** Where they're walking (waypoints through doorways), and how long until they do something else. */
+  path: { x: number; z: number }[];
+  wait: number;
+  /** A spell of the calmer idle, and for how long. */
+  gesture?: { clip: 'neutral'; time: number };
+  disposables: { dispose(): void }[];
+}
 
 interface Walker {
   root: TransformNode;
@@ -73,10 +100,12 @@ export class TownLife {
   private readonly containers = new Map<string, Promise<{ container: AssetContainer; scale: number }>>();
   private night = false;
   private disposed = false;
+  /** The people inside the building the player is in. */
+  private indoor?: { interior: CityInterior; people: Indoor[] };
 
   constructor(
     private readonly scene: Scene,
-    city: City,
+    private readonly city: City,
     options: TrafficOptions = {},
   ) {
     this.traffic = new TownTraffic(city, options);
@@ -88,10 +117,135 @@ export class TownLife {
     this.night = night;
   }
 
-  update(dt: number, focus: { x: number; z: number }, obstacles: { x: number; z: number }[] = []) {
+  update(dt: number, focus: { x: number; y?: number; z: number }, obstacles: { x: number; z: number }[] = []) {
     this.traffic.update(Math.min(dt, 0.1), focus, obstacles);
     this.syncCars(dt);
     this.syncPeople();
+    this.updateIndoor(Math.min(dt, 0.1), focus);
+  }
+
+  // ------------------------------------------------------------------ people inside
+
+  /** Fills the building the player is in with its staff and visitors, and moves them about. */
+  private updateIndoor(dt: number, focus: { x: number; y?: number; z: number }) {
+    const y = focus.y ?? 0;
+    const at = y < -5 ? interiorAt(this.city.interiors, focus.x, y - 1.2, focus.z) : undefined;
+    if (this.indoor && this.indoor.interior !== at?.interior) {
+      for (const person of this.indoor.people) for (const d of person.disposables) d.dispose();
+      this.indoor = undefined;
+    }
+    if (!at) return;
+    if (!this.indoor) {
+      // People's homes are their own: nobody wanders about in one uninvited.
+      const home = PRIVATE.has(at.interior.kind);
+      this.indoor = { interior: at.interior, people: home ? [] : at.interior.spots.slice(0, INDOOR_MAX).map((spot, i) => this.addIndoor(spot, i)) };
+    }
+    for (const person of this.indoor.people) {
+      // Upstairs people go out of sight with their floor.
+      person.root.setEnabled(person.spot.level <= at.level);
+      this.moveIndoor(person, this.indoor.interior, dt);
+    }
+  }
+
+  private addIndoor(spot: InteriorSpot, i: number): Indoor {
+    const root = new TransformNode(`indoor-${i}`, this.scene);
+    root.parent = this.root;
+    root.position.set(spot.x, spot.y, spot.z);
+    root.rotation.y = spot.heading;
+    const person: Indoor = { spot, root, clips: {}, x: spot.x, z: spot.z, heading: spot.heading, path: [], wait: 1 + Math.random() * 6, disposables: [root] };
+    const look = WALKERS[Math.floor(Math.random() * WALKERS.length)];
+    void this.spawn(`/assets/characters/${look}.glb`, PERSON_HEIGHT, `indoor-${i}`, root, person.disposables).then(({ clip }) => {
+      person.clips = {
+        walk: clip((n) => n === WALK_CLIP),
+        idle: clip((n) => n === IDLE_CLIP) ?? clip((n) => n.endsWith('Idle')),
+        neutral: clip((n) => n === NEUTRAL_CLIP),
+      };
+      person.playing = undefined;
+    });
+    return person;
+  }
+
+  private play(person: Indoor, clip: 'walk' | 'idle' | 'neutral') {
+    if (person.playing === clip) return;
+    const next = person.clips[clip];
+    if (!next) return;
+    if (person.playing) person.clips[person.playing as keyof Indoor['clips']]?.stop();
+    next.start(true, clip === 'walk' ? INDOOR_PACE / WALK_CLIP_SPEED : 1);
+    person.playing = clip;
+  }
+
+  private moveIndoor(person: Indoor, interior: CityInterior, dt: number) {
+    if (person.gesture) {
+      person.gesture.time -= dt;
+      this.play(person, person.gesture.clip);
+      if (person.gesture.time <= 0) person.gesture = undefined;
+      return;
+    }
+    const target = person.path[0];
+    if (target) {
+      // Walking to the next waypoint.
+      const dx = target.x - person.x;
+      const dz = target.z - person.z;
+      const distance = Math.hypot(dx, dz);
+      if (distance < 0.15) {
+        person.path.shift();
+        if (!person.path.length) person.wait = 3 + Math.random() * 8;
+      } else {
+        const step = Math.min(distance, INDOOR_PACE * dt);
+        person.x += (dx / distance) * step;
+        person.z += (dz / distance) * step;
+        const want = Math.atan2(dx, dz);
+        person.heading += Math.atan2(Math.sin(want - person.heading), Math.cos(want - person.heading)) * Math.min(1, dt * 8);
+      }
+      this.play(person, 'walk');
+    } else {
+      // Standing about: staff at their post now and then busy with something, visitors off somewhere new.
+      person.wait -= dt;
+      const settle = Math.atan2(Math.sin(person.spot.heading - person.heading), Math.cos(person.spot.heading - person.heading));
+      if (person.spot.role === 'staff') person.heading += settle * Math.min(1, dt * 4);
+      this.play(person, 'idle');
+      if (person.wait <= 0) {
+        person.wait = 4 + Math.random() * 8;
+        if (person.spot.role === 'staff' || Math.random() < 0.25) person.gesture = { clip: 'neutral', time: 3 + Math.random() * 4 };
+        else person.path = this.route(interior, person);
+      }
+    }
+    person.root.position.set(person.x, person.spot.y, person.z);
+    person.root.rotation.y = person.heading;
+  }
+
+  /** A walk from where someone is to somewhere in another room on their floor, through the doorways. */
+  private route(interior: CityInterior, person: Indoor): { x: number; z: number }[] {
+    const level = person.spot.level;
+    const inRoom = (i: number, x: number, z: number) => {
+      const r = interior.rooms[i];
+      return r.level === level && x >= r.x0 - 0.2 && x <= r.x1 + 0.2 && z >= r.z0 - 0.2 && z <= r.z1 + 0.2;
+    };
+    const start = interior.rooms.findIndex((_, i) => inRoom(i, person.x, person.z));
+    if (start < 0) return [];
+    const options = interior.rooms.map((r, i) => i).filter((i) => interior.rooms[i].level === level);
+    const goal = options[Math.floor(Math.random() * options.length)];
+    // Breadth first through the doorways (links between two rooms on this floor).
+    const from = new Map<number, { room: number; link: { x: number; z: number } } | null>([[start, null]]);
+    const queue = [start];
+    while (queue.length && !from.has(goal)) {
+      const room = queue.shift()!;
+      for (const link of interior.links) {
+        if (link.level !== level || link.a < 0 || link.b < 0) continue;
+        const next = link.a === room ? link.b : link.b === room ? link.a : -1;
+        if (next < 0 || from.has(next)) continue;
+        from.set(next, { room, link });
+        queue.push(next);
+      }
+    }
+    if (!from.has(goal)) return [];
+    const path: { x: number; z: number }[] = [];
+    for (let at = goal; from.get(at); at = from.get(at)!.room) path.unshift(from.get(at)!.link);
+    // Then somewhere in the room, clear of its walls.
+    const r = interior.rooms[goal];
+    const inset = Math.min(1.2, (r.x1 - r.x0) / 3, (r.z1 - r.z0) / 3);
+    path.push({ x: r.x0 + inset + Math.random() * (r.x1 - r.x0 - 2 * inset), z: r.z0 + inset + Math.random() * (r.z1 - r.z0 - 2 * inset) });
+    return path;
   }
 
   // ------------------------------------------------------------------ cars
@@ -245,6 +399,7 @@ export class TownLife {
     this.disposed = true;
     for (const drawn of this.cars.values()) drawn.visual?.dispose();
     for (const walker of this.people.values()) for (const d of walker.disposables) d.dispose();
+    for (const person of this.indoor?.people ?? []) for (const d of person.disposables) d.dispose();
     this.root.dispose();
     for (const loading of this.containers.values()) void loading.then(({ container }) => container.dispose());
     this.vehicles.dispose();

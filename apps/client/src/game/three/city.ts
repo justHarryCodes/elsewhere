@@ -3,8 +3,9 @@ import { KERB_HEIGHT, type City, type CityShape, type CitySign } from '@game/sha
 import { type Batch, MegaKit, ROOM_MATERIALS, ROOM_TEXTURES } from '../megakit';
 
 /**
- * Three.js counterpart of the Babylon CityRenderer: the same MegaKit city, welded into one mesh per
- * material for the whole city at once (no streaming or night look here; Babylon is the main renderer).
+ * Three.js counterpart of the Babylon CityRenderer: the same city, welded into one mesh per material for
+ * the whole city at once (no streaming, night look, wallpaper patterns or moving monorail here: Babylon
+ * is the main renderer).
  */
 export class CityRenderer {
   readonly root = new THREE.Group();
@@ -139,7 +140,7 @@ export class CityRenderer {
     }
   }
 
-  /** Paving on the blocks, asphalt or dirt on the lots, dirt all round. */
+  /** Paving on the sidewalks, lawn, asphalt or dirt on the lots, lawn all round. */
   private addGround(city: City, kit: MegaKit) {
     const surface = (material: string, tile: number) => {
       const source = kit.materials.get(material)!;
@@ -167,7 +168,7 @@ export class CityRenderer {
       mesh.receiveShadow = true;
       this.root.add(mesh);
     };
-    for (const b of city.blocks) quad(b, KERB_HEIGHT, paving);
+    for (const s of city.sidewalks) quad(s, KERB_HEIGHT, paving);
     const surfaces = { lawn: [lawn, 0.005], path: [path, 0.015], dirt: [dirt, 0.01], plaza: [paving, 0.01], parking: [asphalt, 0.01], yard: [asphalt, 0.01] } as const;
     for (const lot of city.lots) quad(lot, KERB_HEIGHT + surfaces[lot.kind][1], surfaces[lot.kind][0]);
     const margin = 400;

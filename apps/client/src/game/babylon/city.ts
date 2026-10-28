@@ -20,12 +20,15 @@ import {
   type City,
   type CityLight,
   type CityLot,
+  type CityMonorail,
   type CityNeon,
   type CityPiece,
+  type CityInterior,
   type CityShape,
   type CitySign,
+  interiorAt,
 } from '@game/shared';
-import { type Batch, MegaKit, ROOM_MATERIALS, ROOM_TEXTURES } from '../megakit';
+import { type Batch, MegaKit, PATTERN_URL, ROOM_MATERIALS, ROOM_TEXTURES } from '../megakit';
 
 // The city streams in square chunks round the player: built (rising out of the ground) when they
 // come within BUILD_RADIUS, taken down again (sinking away) once they're past KEEP_RADIUS. The gap
@@ -37,6 +40,10 @@ const RISE_SECONDS = 0.7;
 const SINK_SECONDS = 0.5;
 const POOL_RADIUS = 7; // metres of road lit under a street lamp
 const POOL_Y = KERB_HEIGHT + 0.03; // just above the sidewalks, so the light pools never flicker into them
+const TRAIN_SPEED = 9; // m/s, a gentle ride round Parkside
+const TRAIN_CAR = 3.3; // from one car to the next, metres
+/** Walls between the camera and the player inside are cut down to this height (a share of full). */
+const CUTAWAY = 0.14;
 
 // The kit's triangles (and the ground's) wind counter-clockwise, glTF style; in this right-handed scene
 // that's the front, as Babylon's own glTF loader sets it.
@@ -62,8 +69,6 @@ interface Chunk {
   pieces: CityPiece[];
   shapes: CityShape[];
   signs: CitySign[];
-  /** The rooms under this chunk's buildings: drawn apart, out of the sun's shadows. */
-  rooms: { pieces: CityPiece[]; shapes: CityShape[] };
   neon: Map<number, CityNeon[]>;
   lights: Map<number, CityLight[]>;
   state: 'empty' | 'loading' | 'rising' | 'built' | 'sinking';
@@ -80,12 +85,14 @@ export interface CityRendererOptions {
 }
 
 /**
- * Draws a generated city from the MegaKit, streamed in chunks round a focus point (the player): call
+ * Draws a generated city from the packs, streamed in chunks round a focus point (the player): call
  * update() every frame. A chunk's streets, buildings and props are welded into one mesh per material
- * (a dozen draw calls), so it costs the same however many pieces it took to build.
+ * (a dozen draw calls), so it costs the same however many pieces it took to build. Room walls and
+ * floors with a pattern are papered with Kenney's pattern tiles, recoloured into wallpaper. The
+ * monorail's train runs round its loop all the time, wherever the player is.
  *
- * By day the town is plain daylight. At night (setNight) the neon comes on (shop-front tubes, blade signs,
- * billboards, tower outlines), the lit rooms behind the windows glow, and street lamps throw pools of light.
+ * By day the town is plain daylight. At night (setNight) the shop neon comes on, the lit rooms behind
+ * the windows glow, and street lights throw pools of light.
  */
 export class CityRenderer {
   readonly root: TransformNode;
@@ -98,14 +105,25 @@ export class CityRenderer {
   private night = false;
   /** Neon, lamp heads and light pools: drawn only at night. */
   private readonly nightOnly = new Set<Mesh>();
-  /** Meshes of the rooms under the buildings (they don't rise and sink with the street). */
-  private readonly rooms = new Set<Mesh>();
+  private city?: City;
+  /**
+   * The inside the player is in, drawn on its own: its meshes by level (the ones above the player's
+   * hidden), its walls one by one (cut down when they stand between the camera and the player), its light.
+   */
+  private room?: {
+    interior: CityInterior;
+    meshes: { mesh: Mesh; level: number }[];
+    walls: { meshes: Mesh[]; level: number; x: number; z: number; t: number }[];
+  };
   private readonly materials = new Map<string, PBRMaterial>();
   private readonly textures = new Map<string, Texture>();
   private readonly neonMaterials: StandardMaterial[];
   private readonly poolMaterials: StandardMaterial[];
   private readonly shapeMaterials = new Map<string, PBRMaterial>();
+  private readonly patternMaterials = new Map<string, PBRMaterial>();
   private readonly signMaterials = new Map<string, StandardMaterial>();
+  /** The monorail's train: its cars, the loop they run on (with the distance to each point), how far round it is. */
+  private train?: { cars: TransformNode[]; path: { x: number; z: number }[]; at: number[]; length: number; y: number; s: number };
 
   private constructor(
     private readonly scene: Scene,
@@ -155,7 +173,7 @@ export class CityRenderer {
       const key = `${cx},${cz}`;
       let chunk = chunks.get(key);
       if (!chunk) {
-        chunk = { key, x0: cx * CHUNK, z0: cz * CHUNK, pieces: [], shapes: [], signs: [], rooms: { pieces: [], shapes: [] }, neon: new Map(), lights: new Map(), state: 'empty', meshes: [], t: 0 };
+        chunk = { key, x0: cx * CHUNK, z0: cz * CHUNK, pieces: [], shapes: [], signs: [], neon: new Map(), lights: new Map(), state: 'empty', meshes: [], t: 0 };
         chunks.set(key, chunk);
       }
       return chunk;
@@ -171,16 +189,14 @@ export class CityRenderer {
     for (const b of city.buildings) chunkAt((b.x0 + b.x1) / 2, (b.z0 + b.z1) / 2).pieces.push(...b.pieces);
     for (const s of city.shapes) chunkAt(s.x, s.z).shapes.push(s);
     for (const s of city.signs) chunkAt(s.x, s.z).signs.push(s);
-    for (const room of city.interiors) {
-      const rooms = chunkAt(room.x, room.z).rooms;
-      rooms.pieces.push(...room.pieces);
-      rooms.shapes.push(...room.shapes);
-    }
+    renderer.city = city;
     for (const n of city.neon) addTo(chunkAt(n.x, n.z).neon, n.color, n);
     for (const l of city.lights) addTo(chunkAt(l.x, l.z).lights, l.color, l);
     renderer.chunks.push(...chunks.values());
-    void renderer.kitLoading.then(() => {
-      if (!renderer.disposed) renderer.addGround(city, outsideGround);
+    void renderer.kitLoading.then((kit) => {
+      if (renderer.disposed) return;
+      renderer.addGround(city, outsideGround);
+      renderer.addTrain(kit, city.monorail);
     });
     return renderer;
   }
@@ -201,7 +217,7 @@ export class CityRenderer {
   }
 
   /** Builds chunks coming into range (nearest first), takes down ones left behind, animates both. */
-  update(focus: { x: number; z: number }, dt: number) {
+  update(focus: { x: number; y?: number; z: number }, dt: number) {
     let next: Chunk | undefined;
     let nearest = Infinity;
     for (const chunk of this.chunks) {
@@ -221,6 +237,66 @@ export class CityRenderer {
     }
     // One chunk per frame at most, so a frame never has to build half the city.
     if (next && this.kit) this.build(next, this.kit);
+    this.moveTrain(dt);
+    this.updateRoom(focus, dt);
+  }
+
+  // ------------------------------------------------------------------ the monorail's train
+
+  /** The train's cars, each welded from the Coaster Kit's monorail car, set on the loop. */
+  private addTrain(kit: MegaKit, monorail: CityMonorail) {
+    const { path } = monorail;
+    if (path.length < 2) return;
+    const at = [0];
+    for (let i = 1; i <= path.length; i++) {
+      const a = path[i - 1];
+      const b = path[i % path.length];
+      at.push(at[i - 1] + Math.hypot(b.x - a.x, b.z - a.z));
+    }
+    const cars: TransformNode[] = [];
+    const batches = kit.weld([{ piece: 'k/coaster/train-monorail', x: 0, y: 0, z: 0, yaw: 0 }]);
+    for (let k = 0; k < monorail.cars; k++) {
+      const car = new TransformNode(`city-train-${k}`, this.scene);
+      car.parent = this.root;
+      for (const [key, batch] of batches) {
+        const mesh = this.batchMesh(`city-train-${k}-${key}`, batch, this.material(kit, key));
+        mesh.parent = car;
+        mesh.isPickable = false;
+        mesh.receiveShadows = true;
+        this.meshes.add(mesh);
+        this.onMesh?.(mesh, 'building');
+      }
+      cars.push(car);
+    }
+    this.train = { cars, path, at, length: at[path.length], y: monorail.y, s: 0 };
+    this.moveTrain(0);
+  }
+
+  /** Where the loop is `s` metres round from its first point. */
+  private trainPoint(s: number): { x: number; z: number } {
+    const train = this.train!;
+    const d = ((s % train.length) + train.length) % train.length;
+    let i = 1;
+    while (i < train.at.length - 1 && train.at[i] < d) i++;
+    const a = train.path[i - 1];
+    const b = train.path[i % train.path.length];
+    const t = (d - train.at[i - 1]) / Math.max(1e-6, train.at[i] - train.at[i - 1]);
+    return { x: a.x + (b.x - a.x) * t, z: a.z + (b.z - a.z) * t };
+  }
+
+  private moveTrain(dt: number) {
+    const train = this.train;
+    if (!train) return;
+    train.s = (train.s + TRAIN_SPEED * dt) % train.length;
+    train.cars.forEach((car, k) => {
+      const s = train.s - k * TRAIN_CAR;
+      const p = this.trainPoint(s);
+      // Facing along the track, from a little behind to a little ahead, so it turns smoothly round the corners.
+      const ahead = this.trainPoint(s + 1.5);
+      const behind = this.trainPoint(s - 1.5);
+      car.position.set(p.x, train.y, p.z);
+      car.rotation.y = Math.atan2(ahead.x - behind.x, ahead.z - behind.z);
+    });
   }
 
   private animate(chunk: Chunk, dt: number) {
@@ -251,7 +327,7 @@ export class CityRenderer {
     // The mesh's own scale applies after its vertices are placed, so scaling Y squashes the whole
     // chunk down onto the ground (y = 0): it grows up out of the street, or sinks into it.
     const k = chunk.t * chunk.t * (3 - 2 * chunk.t);
-    for (const mesh of chunk.meshes) if (!this.rooms.has(mesh)) mesh.scaling.y = Math.max(k, 0.001);
+    for (const mesh of chunk.meshes) mesh.scaling.y = Math.max(k, 0.001);
   }
 
   private build(chunk: Chunk, kit: MegaKit) {
@@ -261,11 +337,6 @@ export class CityRenderer {
     }
     // Tanks, chimneys, containers and lamp posts: one batch per shape and colour.
     this.addShapes(chunk, chunk.shapes, 'building');
-    // Rooms: their furniture and walls, apart from the street so the buildings' shadows stay out.
-    for (const [key, batch] of kit.weld(chunk.rooms.pieces)) {
-      this.addToChunk(chunk, this.batchMesh(`city-room-${key}-${chunk.key}`, batch, this.material(kit, key)), 'interior');
-    }
-    this.addShapes(chunk, chunk.rooms.shapes, 'interior');
     // Name boards of the public buildings.
     for (const sign of chunk.signs) {
       const board = MeshBuilder.CreatePlane(`city-sign-${sign.text}`, { width: sign.w, height: sign.h, sideOrientation: Mesh.DOUBLESIDE }, this.scene);
@@ -295,30 +366,88 @@ export class CityRenderer {
     chunk.state = 'rising';
   }
 
-  /** Code-made boxes and cylinders: one batch per shape and colour. */
+  /** Code-made boxes and cylinders of a chunk. */
   private addShapes(chunk: Chunk, list: CityShape[], kind: CityMeshKind) {
+    for (const mesh of this.shapeMeshes(list, `city-${kind}-${chunk.key}`)) this.addToChunk(chunk, mesh, kind);
+  }
+
+  /**
+   * Code-made shapes as meshes: one per look (shape, colour or wallpaper, glowing or glass). Boxes are
+   * welded into one mesh, measured from `baseY` (so it can be squashed toward that floor); cylinders are
+   * instances of one.
+   */
+  private shapeMeshes(list: CityShape[], name: string, baseY = 0, matte = false): Mesh[] {
     const groups = new Map<string, CityShape[]>();
     for (const s of list) {
-      const key = `${s.kind}|${s.color}`;
+      const key = `${s.kind}|${s.pattern ?? ''}|${s.color}|${s.ink ?? ''}|${s.glow ? 1 : 0}|${s.glass ? 1 : 0}`;
       const group = groups.get(key);
       if (group) group.push(s);
       else groups.set(key, [s]);
     }
+    const meshes: Mesh[] = [];
     for (const [key, group] of groups) {
-      const [shape, color] = key.split('|');
-      const name = `city-${kind}-${key}-${chunk.key}`;
-      const mesh =
-        shape === 'box'
-          ? MeshBuilder.CreateBox(name, { size: 1 }, this.scene)
-          : MeshBuilder.CreateCylinder(name, { diameter: 1, height: 1, tessellation: 20 }, this.scene);
-      mesh.material = this.shapeMaterial(color);
-      // Unit shapes centred on the origin: lift by half their height so y is their base.
-      this.setInstances(
-        mesh,
-        group.map((s) => ({ x: s.x, y: s.y + s.h / 2, z: s.z, sx: s.w, sy: s.h, sz: s.d, yaw: s.yaw })),
-      );
-      this.addToChunk(chunk, mesh, kind);
+      const s = group[0];
+      let mesh: Mesh;
+      if (s.kind === 'box') {
+        mesh = this.patternBoxes(`${name}-${key}`, group, baseY);
+        mesh.position.y = baseY;
+      } else {
+        mesh = MeshBuilder.CreateCylinder(`${name}-${key}`, { diameter: 1, height: 1, tessellation: 20 }, this.scene);
+        // Unit shapes centred on the origin: lift by half their height so y is their base.
+        this.setInstances(mesh, group.map((c) => ({ x: c.x, y: c.y + c.h / 2, z: c.z, sx: c.w, sy: c.h, sz: c.d, yaw: c.yaw })));
+      }
+      mesh.material = s.pattern ? this.patternMaterial(s) : s.glow ? this.glowMaterial(s.color) : s.glass ? this.glassMaterial(s.color) : this.shapeMaterial(s.color, matte);
+      meshes.push(mesh);
     }
+    return meshes;
+  }
+
+  /**
+   * Boxes in one mesh, `baseY` taken off their heights: each face mapped in metres (one repeat every
+   * `tile`), so wallpaper is the same size on every wall however long, and doesn't stretch.
+   */
+  private patternBoxes(name: string, boxes: CityShape[], baseY = 0): Mesh {
+    const positions: number[] = [];
+    const normals: number[] = [];
+    const uvs: number[] = [];
+    const indices: number[] = [];
+    // Each face: its outward normal, and the two directions across it (u, then v), with u x v = normal.
+    const faces: [number[], number[], number[]][] = [
+      [[1, 0, 0], [0, 0, -1], [0, 1, 0]],
+      [[-1, 0, 0], [0, 0, 1], [0, 1, 0]],
+      [[0, 0, 1], [1, 0, 0], [0, 1, 0]],
+      [[0, 0, -1], [-1, 0, 0], [0, 1, 0]],
+      [[0, 1, 0], [1, 0, 0], [0, 0, -1]],
+      [[0, -1, 0], [1, 0, 0], [0, 0, 1]],
+    ];
+    for (const s of boxes) {
+      const half = [s.w / 2, s.h / 2, s.d / 2];
+      const tile = s.tile ?? 1;
+      const c = Math.cos(s.yaw);
+      const sn = Math.sin(s.yaw);
+      const turn = (v: number[]) => [v[0] * c + v[2] * sn, v[1], -v[0] * sn + v[2] * c];
+      for (const [n, u, v] of faces) {
+        const extentU = Math.abs(u[0]) * s.w + Math.abs(u[1]) * s.h + Math.abs(u[2]) * s.d;
+        const extentV = Math.abs(v[0]) * s.w + Math.abs(v[1]) * s.h + Math.abs(v[2]) * s.d;
+        const base = positions.length / 3;
+        for (const [a, b] of [[-1, -1], [1, -1], [1, 1], [-1, 1]]) {
+          const local = [0, 1, 2].map((k) => n[k] * half[k] + (u[k] * a * extentU) / 2 + (v[k] * b * extentV) / 2);
+          const p = turn(local);
+          positions.push(s.x + p[0], s.y - baseY + half[1] + p[1], s.z + p[2]);
+          normals.push(...turn(n));
+          uvs.push(((a + 1) / 2) * (extentU / tile), ((b + 1) / 2) * (extentV / tile));
+        }
+        indices.push(base, base + 1, base + 2, base, base + 2, base + 3);
+      }
+    }
+    const mesh = new Mesh(name, this.scene);
+    const data = new VertexData();
+    data.positions = positions;
+    data.normals = normals;
+    data.uvs = uvs;
+    data.indices = indices;
+    data.applyToMesh(mesh, false);
+    return mesh;
   }
 
   private batchMesh(name: string, batch: Batch, material: PBRMaterial): Mesh {
@@ -350,13 +479,7 @@ export class CityRenderer {
   private addToChunk(chunk: Chunk, mesh: Mesh, kind: CityMeshKind) {
     mesh.parent = this.root;
     mesh.isPickable = false;
-    // Rooms are far underground: squashing them onto the street would flash them up there.
-    if (kind === 'interior') {
-      this.rooms.add(mesh);
-      mesh.onDisposeObservable.addOnce(() => this.rooms.delete(mesh));
-    } else {
-      mesh.scaling.y = 0.001;
-    }
+    mesh.scaling.y = 0.001;
     if (kind === 'building') mesh.receiveShadows = true;
     if (kind === 'neon' || kind === 'lamp' || kind === 'pool') {
       this.nightOnly.add(mesh);
@@ -497,24 +620,198 @@ export class CityRenderer {
     material.freeze();
   }
 
-  private shapeMaterial(hex: string): PBRMaterial {
-    let material = this.shapeMaterials.get(hex);
+  /**
+   * Wallpaper (or a floor) from one of Kenney's pattern tiles: the tile's white drawn in the shape's
+   * `ink` over its `color`, painted into a canvas once the tile has loaded (plain `color` until then).
+   */
+  private patternMaterial(shape: CityShape): PBRMaterial {
+    const key = `${shape.pattern}|${shape.color}|${shape.ink}`;
+    let material = this.patternMaterials.get(key);
+    if (material) return material;
+    const size = 256;
+    const texture = new DynamicTexture(`city-pattern-${key}`, { width: size, height: size }, this.scene, true);
+    texture.wrapU = Texture.WRAP_ADDRESSMODE;
+    texture.wrapV = Texture.WRAP_ADDRESSMODE;
+    const ctx = texture.getContext() as CanvasRenderingContext2D;
+    ctx.fillStyle = shape.color;
+    ctx.fillRect(0, 0, size, size);
+    texture.update();
+    const image = new Image();
+    image.onload = () => {
+      if (this.disposed) return;
+      // The tiles are white on black (the pictures) or white on clear (the line patterns): how white
+      // and how opaque a pixel is says how much ink it gets.
+      const scratch = document.createElement('canvas');
+      scratch.width = size;
+      scratch.height = size;
+      const sctx = scratch.getContext('2d')!;
+      sctx.drawImage(image, 0, 0, size, size);
+      const pixels = sctx.getImageData(0, 0, size, size);
+      const paper = Color3.FromHexString(shape.color);
+      const ink = Color3.FromHexString(shape.ink ?? shape.color);
+      const out = ctx.createImageData(size, size);
+      for (let i = 0; i < pixels.data.length; i += 4) {
+        const t = (pixels.data[i] / 255) * (pixels.data[i + 3] / 255);
+        out.data[i] = (paper.r + (ink.r - paper.r) * t) * 255;
+        out.data[i + 1] = (paper.g + (ink.g - paper.g) * t) * 255;
+        out.data[i + 2] = (paper.b + (ink.b - paper.b) * t) * 255;
+        out.data[i + 3] = 255;
+      }
+      ctx.putImageData(out, 0, 0);
+      texture.update();
+    };
+    image.src = `${PATTERN_URL}${shape.pattern}`;
+    material = new PBRMaterial(`city-pattern-${key}`, this.scene);
+    material.sideOrientation = FRONT_FACES;
+    material.albedoTexture = texture;
+    material.metallic = 0;
+    material.roughness = 0.9;
+    this.patternMaterials.set(key, material);
+    return material;
+  }
+
+  /** A flat colour: painted metal outside, matte (walls, furniture) inside. */
+  private shapeMaterial(hex: string, matte = false): PBRMaterial {
+    const key = `${hex}|${matte}`;
+    let material = this.shapeMaterials.get(key);
     if (!material) {
-      material = new PBRMaterial(`city-paint-${hex}`, this.scene);
+      material = new PBRMaterial(`city-paint-${key}`, this.scene);
       material.albedoColor = Color3.FromHexString(hex).toLinearSpace();
-      material.metallic = 0.35;
-      material.roughness = 0.55;
+      material.metallic = matte ? 0 : 0.35;
+      material.roughness = matte ? 0.8 : 0.55;
       material.freeze();
-      this.shapeMaterials.set(hex, material);
+      this.shapeMaterials.set(key, material);
     }
     return material;
+  }
+
+  /** Lit from within: screens, signs, lamps, daylight in the windows. */
+  private glowMaterial(hex: string): StandardMaterial {
+    const key = `glow|${hex}`;
+    let material = this.signMaterials.get(key);
+    if (!material) {
+      material = new StandardMaterial(`city-glow-${hex}`, this.scene);
+      material.sideOrientation = FRONT_FACES;
+      material.disableLighting = true;
+      material.emissiveColor = Color3.FromHexString(hex);
+      material.freeze();
+      this.signMaterials.set(key, material);
+    }
+    return material;
+  }
+
+  /** See-through glass (balustrades, meeting rooms). */
+  private glassMaterial(hex: string): StandardMaterial {
+    const key = `glass|${hex}`;
+    let material = this.signMaterials.get(key);
+    if (!material) {
+      material = new StandardMaterial(`city-glass-${hex}`, this.scene);
+      material.diffuseColor = Color3.FromHexString(hex);
+      material.specularColor = new Color3(0.6, 0.6, 0.6);
+      material.alpha = 0.32;
+      material.backFaceCulling = false;
+      material.freeze();
+      this.signMaterials.set(key, material);
+    }
+    return material;
+  }
+
+  // ------------------------------------------------------------------ the inside the player is in
+
+  /** Builds, shows and hides the inside round `focus` (a point under the town), or takes it down. */
+  private updateRoom(focus: { x: number; y?: number; z: number }, dt: number) {
+    const y = focus.y ?? 0;
+    const at = y < -5 && this.city && this.kit ? interiorAt(this.city.interiors, focus.x, y - 1.2, focus.z) : undefined;
+    if (this.room && this.room.interior !== at?.interior) this.disposeRoom();
+    if (!at) return;
+    if (!this.room) this.buildRoom(at.interior, this.kit!);
+    const room = this.room!;
+    // Floors above the player out of the way.
+    for (const { mesh, level } of room.meshes) mesh.setEnabled(level <= at.level);
+    // Walls on this floor between the camera and the player cut down, the rest full height.
+    const camera = this.scene.activeCamera;
+    if (!camera) return;
+    let fx = focus.x - camera.position.x;
+    let fz = focus.z - camera.position.z;
+    const length = Math.hypot(fx, fz) || 1;
+    fx /= length;
+    fz /= length;
+    const k = 1 - Math.exp(-10 * dt);
+    for (const wall of room.walls) {
+      const ahead = (wall.x - focus.x) * fx + (wall.z - focus.z) * fz;
+      const cut = wall.level === at.level && ahead < -0.4;
+      wall.t += ((cut ? CUTAWAY : 1) - wall.t) * k;
+      for (const mesh of wall.meshes) {
+        mesh.scaling.y = wall.t;
+        mesh.setEnabled(wall.level <= at.level);
+      }
+    }
+  }
+
+  private buildRoom(interior: CityInterior, kit: MegaKit) {
+    const meshes: { mesh: Mesh; level: number }[] = [];
+    const walls: { meshes: Mesh[]; level: number; x: number; z: number; t: number }[] = [];
+    const add = (mesh: Mesh, level: number) => {
+      mesh.parent = this.root;
+      mesh.isPickable = false;
+      this.meshes.add(mesh);
+      this.onMesh?.(mesh, 'interior');
+      meshes.push({ mesh, level });
+    };
+    const levels = new Set<number>([...interior.pieces.map((p) => p.level ?? 0), ...interior.shapes.map((s) => s.level ?? 0)]);
+    for (const level of levels) {
+      for (const [key, batch] of kit.weld(interior.pieces.filter((p) => (p.level ?? 0) === level))) {
+        add(this.batchMesh(`room-${level}-${key}`, batch, this.material(kit, key)), level);
+      }
+      for (const mesh of this.shapeMeshes(interior.shapes.filter((s) => (s.level ?? 0) === level && !s.wall), `room-${level}`, 0, true)) add(mesh, level);
+    }
+    // Each wall apart, its pieces measured from its floor so it can be squashed down onto it.
+    const byWall = new Map<number, CityShape[]>();
+    for (const s of interior.shapes) {
+      if (!s.wall) continue;
+      const list = byWall.get(s.wall);
+      if (list) list.push(s);
+      else byWall.set(s.wall, [s]);
+    }
+    for (const [id, list] of byWall) {
+      const level = list[0].level ?? 0;
+      const floor = Math.min(...list.map((s) => s.y));
+      const wallMeshes = this.shapeMeshes(list, `room-wall-${id}`, floor, true);
+      for (const mesh of wallMeshes) {
+        mesh.parent = this.root;
+        mesh.isPickable = false;
+        this.meshes.add(mesh);
+        this.onMesh?.(mesh, 'interior');
+      }
+      const x = list.reduce((sum, s) => sum + s.x, 0) / list.length;
+      const z = list.reduce((sum, s) => sum + s.z, 0) / list.length;
+      walls.push({ meshes: wallMeshes, level, x, z, t: 1 });
+    }
+    this.room = { interior, meshes, walls };
+  }
+
+  private disposeRoom() {
+    const room = this.room;
+    if (!room) return;
+    for (const { mesh } of room.meshes) {
+      this.meshes.delete(mesh);
+      mesh.dispose(false, false);
+    }
+    for (const wall of room.walls) {
+      for (const mesh of wall.meshes) {
+        this.meshes.delete(mesh);
+        mesh.dispose(false, false);
+      }
+    }
+    this.room = undefined;
   }
 
   // ------------------------------------------------------------------ ground
 
   /**
-   * The ground between the streets, flush with the sidewalks: paving on every block, with parking lots
-   * (asphalt and white bays), plazas, works yards and bare dirt laid on top. Cheap enough to keep whole.
+   * The ground between the streets: the sidewalks' paving out to the road tiles' kerbs, lawn over the
+   * blocks, and parking lots (asphalt and white bays), plazas, paths and bare dirt laid on top. Cheap
+   * enough to keep whole.
    */
   private addGround(city: City, outside: boolean) {
     const kit = this.kit!;
@@ -544,7 +841,7 @@ export class CityRenderer {
       list.push({ ...r, y });
       quads.set(key, list);
     };
-    for (const b of city.blocks) add('paving', b, KERB_HEIGHT);
+    for (const s of city.sidewalks) add('paving', s, KERB_HEIGHT);
     // Laid in layers: lawn over the block's paving, then lots, then paths on top.
     const kinds: Record<CityLot['kind'], [keyof typeof surfaces, number]> = {
       lawn: ['lawn', 0.005],
@@ -642,6 +939,7 @@ export class CityRenderer {
 
   dispose() {
     this.disposed = true;
+    this.disposeRoom();
     this.root.dispose(false, true);
     for (const texture of this.textures.values()) texture.dispose();
   }

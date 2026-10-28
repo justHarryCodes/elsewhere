@@ -35,10 +35,14 @@ export class HumanLibrary {
       bodyNames.map((body, i) => [body, scaledBody(bodyGltfs[i].scene, body)]),
     ) as Record<HumanBody, THREE.Object3D>;
 
-    // Tracks are bound by bone name ("pelvis.quaternion"), so these clips play on any UBC body.
+    // Tracks are bound by bone name ("pelvis.quaternion"), so these clips play on any UBC body. Clips only
+    // rotate bones (plus the root and pelvis movement), so each body keeps its own proportions.
     const clips = new Map<string, THREE.AnimationClip>();
     libraryGltfs.forEach((gltf, i) => {
-      for (const clip of gltf.animations) clips.set(`${libraryNames[i]}/${clip.name}`, clip);
+      for (const clip of gltf.animations) {
+        clip.tracks = clip.tracks.filter((track) => !track.name.endsWith('.position') || /^(root|pelvis)\./.test(track.name));
+        clips.set(`${libraryNames[i]}/${clip.name}`, clip);
+      }
     });
 
     return new HumanLibrary(bodies, clips);

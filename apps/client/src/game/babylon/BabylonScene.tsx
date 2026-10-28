@@ -8,7 +8,7 @@ import {
   Vector3,
 } from "@babylonjs/core";
 import "@babylonjs/loaders/glTF";
-import { type City, toHumanAnimation, toHumanBody } from "@game/shared";
+import { type City, hashSeed, randomAppearance, toHumanAnimation, toHumanBody } from "@game/shared";
 import type { PlayersRef } from "../../net/useGameRoom";
 import { approachAngle, smoothing } from "../smoothing";
 import {
@@ -151,7 +151,9 @@ export function BabylonScene({
       for (const [id, player] of players.current) {
         let human = humans.get(id);
         if (!human) {
-          const character = library.createHuman(toHumanBody(player.body), id);
+          const body = toHumanBody(player.body);
+          // Each player gets a varied look that stays the same for their id.
+          const character = library.createHuman(body, id, randomAppearance(body, hashSeed(id)));
           character.root.position.set(player.x, player.y, player.z);
           character.root.rotation.y = player.heading;
           human = { character, seq: player.animationSeq };

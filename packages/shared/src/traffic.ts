@@ -1,19 +1,20 @@
 // Town life: cars driving the streets and people walking the sidewalks. Pure logic (no drawing, no
 // physics): call update() every frame with where the player is, then draw `cars` and `people`.
 //
-// Cars keep to the right in one of the two lanes, pick a new street at every junction (never straight
-// back), follow the car ahead, stop at red lights downtown, take turns through the other junctions, and
+// Cars keep to the right (in one of the lanes, where a street has two each way), pick a new street at
+// every junction (never straight back), follow the car ahead, stop at red lights in the town centre,
+// take turns through the other junctions, and
 // stop for people and anything else in the road. People walk round the blocks on the sidewalks, now and
 // then stop for a while, and cross the street at the corners when no car is close.
 //
 // It's ambient: each client runs its own, only round the player, so it costs nothing far away.
 
-import { type City, KERB_HEIGHT, LANE_WIDTH, SIDEWALK_WIDTH, STREET_WIDTH } from './city';
+import { type City, KERB_HEIGHT, LANE_WIDTH, LANES_PER_SIDE, SIDEWALK_WIDTH, STREET_WIDTH } from './city';
 
-/** Where the streets run into a junction's square (all junction pieces reach 9 m along each street). */
+/** Where the streets run into a junction's square, sidewalk to sidewalk. */
 const JUNCTION_REACH = STREET_WIDTH / 2;
-/** Lane centres to the right of a street's middle, metres. */
-const LANES = [LANE_WIDTH / 2, LANE_WIDTH * 1.5];
+/** Lane centres to the right of a street's middle, metres: inside and kerbside (one and the same on two-lane streets). */
+const LANES = [LANE_WIDTH / 2, LANE_WIDTH * (LANES_PER_SIDE - 0.5)];
 const CRUISE = 11; // m/s, about 40 km/h
 const TURN_SPEED = 6;
 const ACCELERATION = 2.5;
@@ -22,7 +23,7 @@ const BRAKING = 7;
 const GREEN = 11;
 const CLEAR = 2.5;
 const CYCLE = 2 * (GREEN + CLEAR);
-/** People walk this far out from the block's edge (sidewalks are 3 m wide). */
+/** People walk this far out from the block's edge (on the paving, short of the kerb). */
 const WALK_LINE = 1.4;
 
 export interface TrafficOptions {
@@ -216,8 +217,8 @@ export class TownTraffic {
       const at = this.loopPoint(block, t);
       const d = Math.hypot(at.x - focus.x, at.z - focus.z);
       if (d > this.radius * 0.8 || (d < 35 && this.people.length > 6)) continue;
-      const zone = this.city.blocks[block].zone;
-      if (zone === 'industrial' && this.random() < 0.7) continue;
+      // Fewer people stroll round the graveyard.
+      if (this.city.blocks[block].venue === 'graveyard' && this.random() < 0.7) continue;
       this.people.push({
         id: this.nextId++,
         look: this.random(),

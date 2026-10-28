@@ -1,10 +1,12 @@
 import { useEffect, useMemo, useRef, useState } from 'react';
 import {
+  CITY_ZONE_LABELS,
   HAIR_COLORS,
   HAIR_STYLES,
   HUMAN_ANIMATIONS,
   HUMAN_BODIES,
   SKIN_TONES,
+  type HumanAppearance,
   type HairColor,
   type HairStyle,
   type SkinTone,
@@ -18,13 +20,16 @@ import {
 } from '@game/shared';
 import { CameraControls } from '../game/CameraControls';
 import { CityMap } from '../game/CityMap';
+import { ClothesPanel, Swatches, skinSwatch } from '../ui/appearanceControls';
 import { type MoveMode, MovementSandbox, type SandboxPlace, type SandboxStats } from './movementSandbox';
 
 const ANIMATIONS = Object.entries(HUMAN_ANIMATIONS) as [HumanAnimation, (typeof HUMAN_ANIMATIONS)[HumanAnimation]][];
-const LIBRARY_ORDER: AnimationLibrary[] = ['ual2', 'ual1'];
+const LIBRARY_ORDER: AnimationLibrary[] = ['actions', 'relaxed', 'ual2', 'ual1'];
 const LIBRARY_LABELS: Record<AnimationLibrary, string> = {
   ual1: 'UAL1 · locomotion & core',
   ual2: 'UAL2 · primary library',
+  relaxed: 'Relaxed · walk, jog, sprint',
+  actions: 'Actions · furniture',
 };
 const MOVE_MODES: MoveMode[] = ['walk', 'jog', 'sprint'];
 const SPEED_RATIOS = [0.25, 0.5, 1, 1.5, 2];
@@ -33,9 +38,9 @@ const VEHICLES = (Object.entries(VEHICLE_MODELS) as [VehicleModelKey, (typeof VE
 );
 const PLACES: { place: SandboxPlace; label: string }[] = [
   { place: 'yard', label: 'Test yard' },
-  { place: 'residential', label: 'Homes' },
-  { place: 'commercial', label: 'Downtown' },
-  { place: 'industrial', label: 'Industry' },
+  { place: 'residential', label: CITY_ZONE_LABELS.residential },
+  { place: 'commercial', label: CITY_ZONE_LABELS.commercial },
+  { place: 'leisure', label: CITY_ZONE_LABELS.leisure },
 ];
 const HEADLIGHT_MODES: HeadlightMode[] = ['off', 'low', 'high'];
 // Common car paints: white, silver, black, red, blue, yellow, green, orange.
@@ -117,7 +122,7 @@ export function SandboxPage() {
       {stats?.door && (
         <div className="pointer-events-none absolute bottom-8 left-1/2 -translate-x-1/2 rounded-lg bg-slate-950/80 px-4 py-2 text-sm">
           Press <kbd className="rounded bg-slate-700 px-1.5 py-0.5 font-mono">E</kbd>{' '}
-          {stats.door.inside ? `to go out` : `to go into ${stats.door.name === 'Your home' ? 'your home' : stats.door.name}`}
+          {stats.door.label}
         </div>
       )}
       {stats?.room && !stats.door && (
@@ -147,7 +152,7 @@ export function SandboxPage() {
       <aside className="absolute top-0 left-0 flex h-full w-80 max-w-[85vw] flex-col gap-3 overflow-y-auto bg-slate-950/85 p-4 text-sm backdrop-blur">
         <header className="flex items-center justify-between">
           <h1 className="text-base font-semibold">Movement sandbox</h1>
-          <a href="/" className="text-indigo-300 hover:text-indigo-200">
+          <a href="/city" className="text-indigo-300 hover:text-indigo-200">
             ← Game
           </a>
         </header>
@@ -232,6 +237,13 @@ export function SandboxPage() {
             </label>
           )}
         </section>
+        {stats && (
+          <ClothesPanel
+            body={stats.body}
+            appearance={stats.appearance}
+            onChange={(change) => sandbox()?.setAppearance(change)}
+          />
+        )}
         <Segmented
           label="Move mode"
           options={MOVE_MODES}
@@ -273,7 +285,8 @@ export function SandboxPage() {
         <section className="flex flex-col gap-2 rounded-lg bg-slate-900 p-3">
           <h2 className="text-sm font-semibold">City</h2>
           <p className="text-xs text-slate-400">
-            1 km of streets north of the yard: homes to the west, downtown in the middle, industry to the east.
+            1 km of streets north of the yard: family homes to the west, shops in the middle, and Parkside to the east
+            (fairground, skate park, graveyard, arcade, grocery, diner), with a monorail round it.
             Press E at a door to go in.
           </p>
           <div className="grid grid-cols-5 gap-1">
@@ -477,48 +490,6 @@ export function SandboxPage() {
           wheel to zoom · In the car: W/S throttle and brake (hold S to reverse) · A/D steer · Space handbrake
         </footer>
       </aside>
-    </div>
-  );
-}
-
-// The skin texture averages this colour; each tone tints it.
-const BASE_SKIN = [156, 110, 78];
-function skinSwatch(tone: SkinTone) {
-  const tint = SKIN_TONES[tone].tint;
-  const channel = (i: number) => Math.min(255, Math.round(BASE_SKIN[i] * tint[i]));
-  return `rgb(${channel(0)}, ${channel(1)}, ${channel(2)})`;
-}
-
-function Swatches<T extends string>({
-  label,
-  options,
-  value,
-  onChange,
-}: {
-  label: string;
-  options: { key: T; label: string; colour: string }[];
-  value: T | undefined;
-  onChange: (option: T) => void;
-}) {
-  return (
-    <div className="flex flex-col gap-1">
-      <span className="text-xs text-slate-400">{label}</span>
-      <div className="flex flex-wrap gap-1.5">
-        {options.map((option) => (
-          <button
-            key={option.key}
-            type="button"
-            title={option.label}
-            aria-label={option.label}
-            onClick={(event) => {
-              onChange(option.key);
-              event.currentTarget.blur();
-            }}
-            className={`h-6 w-6 rounded-full border-2 ${value === option.key ? 'border-indigo-400' : 'border-slate-700'}`}
-            style={{ backgroundColor: option.colour }}
-          />
-        ))}
-      </div>
     </div>
   );
 }

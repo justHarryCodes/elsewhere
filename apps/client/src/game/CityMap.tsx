@@ -1,13 +1,26 @@
 import { useEffect, useMemo, useRef, useState } from 'react';
-import { CITY_ZONE_LABELS, type City, type CityZone, cityZoneAt } from '@game/shared';
+import { CITY_ZONE_LABELS, type City, type CityVenue, type CityZone, cityZoneAt } from '@game/shared';
 
-const ZONE_STYLE: Record<CityZone, { label: string; lot: string; building: string; edge: string }> = {
-  residential: { label: CITY_ZONE_LABELS.residential.toUpperCase(), lot: '#0c2321', building: 'rgba(31,209,178,0.28)', edge: '#1fd1b2' },
-  commercial: { label: CITY_ZONE_LABELS.commercial.toUpperCase(), lot: '#1a0f2e', building: 'rgba(255,43,214,0.3)', edge: '#ff2bd6' },
-  industrial: { label: CITY_ZONE_LABELS.industrial.toUpperCase(), lot: '#1f1a10', building: 'rgba(255,176,46,0.25)', edge: '#ffb02e' },
+// A sunny planning map: green lots, pale sidewalks, grey streets, buildings coloured by district.
+const ZONE_STYLE: Record<CityZone, { label: string; lot: string; building: string; edge: string; text: string }> = {
+  residential: { label: CITY_ZONE_LABELS.residential.toUpperCase(), lot: '#a8d88a', building: '#f6b26b', edge: '#b9722c', text: '#7a4510' },
+  commercial: { label: CITY_ZONE_LABELS.commercial.toUpperCase(), lot: '#cfd8c4', building: '#8db8e6', edge: '#3f6fa3', text: '#1f4672' },
+  leisure: { label: CITY_ZONE_LABELS.leisure.toUpperCase(), lot: '#b4e09c', building: '#f19bc9', edge: '#b0457f', text: '#8a2560' },
 };
-const LOT_COLOURS = { lawn: '#0c2416', path: '#2a2638', parking: '#15121f', yard: '#17150f', plaza: '#241a35', dirt: '#1a140c' } as const;
-const ROAD = '#2c2547';
+const LOT_COLOURS = { lawn: '#9fd47e', path: '#efe9dc', parking: '#a3a8b4', yard: '#a3a8b4', plaza: '#ece4d1', dirt: '#d4bb8f' } as const;
+const ROAD = '#8a909d';
+const SIDEWALK = '#e9e5dc';
+const MONORAIL = '#e8487f';
+/** What Parkside's lots are called on the map. */
+const VENUE_LABELS: Partial<Record<CityVenue, string>> = {
+  fairground: 'Fairground',
+  skatepark: 'Skate park',
+  graveyard: 'Graveyard',
+  arcade: 'Arcade',
+  market: 'Grocery',
+  diner: 'Diner',
+  foodcourt: 'Food court',
+};
 
 export interface MapPlayer {
   x: number;
@@ -17,8 +30,9 @@ export interface MapPlayer {
 }
 
 /**
- * A neon plan of the whole city, north (+Z) up. Shows where you are; click anywhere to go there
- * (the nearest street). Closes on Escape, M, or a click outside the map.
+ * A plan of the whole town, north (+Z) up, with the monorail's loop and Parkside's lots named. Shows
+ * where you are; click anywhere to go there (the nearest street). Closes on Escape, M, or a click
+ * outside the map.
  */
 export function CityMap({
   city,
@@ -47,11 +61,13 @@ export function CityMap({
     const ctx = canvas.getContext('2d')!;
     const px = (x: number) => (x - x0) * scale;
     const pz = (z: number) => (z1 - z) * scale;
-    ctx.fillStyle = '#07040f';
+    ctx.fillStyle = '#c7e3ad';
     ctx.fillRect(0, 0, canvas.width, canvas.height);
-    ctx.fillStyle = ROAD;
     const rect = (r: { x0: number; z0: number; x1: number; z1: number }) => [px(r.x0), pz(r.z1), (r.x1 - r.x0) * scale, (r.z1 - r.z0) * scale] as const;
+    ctx.fillStyle = ROAD;
     for (const r of city.roads) ctx.fillRect(...rect(r));
+    ctx.fillStyle = SIDEWALK;
+    for (const s of city.sidewalks) ctx.fillRect(...rect(s));
     for (const b of city.blocks) {
       ctx.fillStyle = ZONE_STYLE[b.zone].lot;
       ctx.fillRect(...rect(b));
@@ -65,22 +81,40 @@ export function CityMap({
       const style = ZONE_STYLE[r.zone];
       ctx.fillStyle = style.building;
       ctx.strokeStyle = style.edge;
-      ctx.globalAlpha = Math.min(1, 0.45 + r.height / 40); // taller glows brighter
       ctx.fillRect(px(r.x0), pz(r.z1), (r.x1 - r.x0) * scale, (r.z1 - r.z0) * scale);
       ctx.strokeRect(px(r.x0), pz(r.z1), (r.x1 - r.x0) * scale, (r.z1 - r.z0) * scale);
     }
-    ctx.globalAlpha = 1;
-    // District names along the top.
-    ctx.font = `bold ${14 * scale}px ui-monospace, monospace`;
-    ctx.textAlign = 'center';
-    for (const d of city.districts) {
-      ctx.fillStyle = ZONE_STYLE[d.zone].edge;
-      ctx.shadowColor = ZONE_STYLE[d.zone].edge;
-      ctx.shadowBlur = 12;
-      ctx.fillText(ZONE_STYLE[d.zone].label, px((d.x0 + d.x1) / 2), 26 * scale);
+    // The monorail's loop.
+    const { path } = city.monorail;
+    if (path.length > 1) {
+      ctx.strokeStyle = MONORAIL;
+      ctx.lineWidth = 2.5 * scale;
+      ctx.setLineDash([8 * scale, 4 * scale]);
+      ctx.beginPath();
+      path.forEach((p, i) => (i === 0 ? ctx.moveTo(px(p.x), pz(p.z)) : ctx.lineTo(px(p.x), pz(p.z))));
+      ctx.closePath();
+      ctx.stroke();
+      ctx.setLineDash([]);
     }
+    const label = (text: string, x: number, y: number, colour: string, size: number) => {
+      ctx.font = `bold ${size * scale}px ui-rounded, system-ui, sans-serif`;
+      ctx.lineWidth = 4 * scale;
+      ctx.strokeStyle = 'rgba(255,255,255,0.9)';
+      ctx.strokeText(text, x, y);
+      ctx.fillStyle = colour;
+      ctx.fillText(text, x, y);
+    };
+    ctx.textAlign = 'center';
+    ctx.textBaseline = 'middle';
+    // Parkside's lots, then the district names along the top.
+    for (const b of city.blocks) {
+      const name = b.venue && VENUE_LABELS[b.venue];
+      if (name) label(name, px((b.x0 + b.x1) / 2), pz((b.z0 + b.z1) / 2), ZONE_STYLE.leisure.text, 9);
+    }
+    for (const d of city.districts) label(ZONE_STYLE[d.zone].label, px((d.x0 + d.x1) / 2), 24 * scale, ZONE_STYLE[d.zone].text, 14);
+    label('MONORAIL', px(path[0]?.x ?? x1) - 34 * scale, pz((z0 + z1) / 2), MONORAIL, 9);
     return canvas;
-  }, [city, width, depth, x0, z1]);
+  }, [city, width, depth, x0, x1, z0, z1]);
 
   useEffect(() => {
     const canvas = canvasRef.current!;
@@ -93,8 +127,8 @@ export function CityMap({
         const sx = ((me.x - x0) / width) * canvas.width;
         const sy = ((z1 - me.z) / depth) * canvas.height;
         const pulse = 10 + 4 * Math.sin(time / 200);
-        ctx.strokeStyle = '#19f0ff';
-        ctx.lineWidth = 2;
+        ctx.strokeStyle = '#1f6feb';
+        ctx.lineWidth = 2.5;
         ctx.beginPath();
         ctx.arc(sx, sy, pulse, 0, Math.PI * 2);
         ctx.stroke();
@@ -102,9 +136,9 @@ export function CityMap({
         ctx.save();
         ctx.translate(sx, sy);
         ctx.rotate(-me.heading + Math.PI);
-        ctx.fillStyle = '#19f0ff';
-        ctx.shadowColor = '#19f0ff';
-        ctx.shadowBlur = 10;
+        ctx.fillStyle = '#1f6feb';
+        ctx.strokeStyle = '#ffffff';
+        ctx.lineWidth = 1.5;
         ctx.beginPath();
         ctx.moveTo(0, 9);
         ctx.lineTo(6, -6);
@@ -112,6 +146,7 @@ export function CityMap({
         ctx.lineTo(-6, -6);
         ctx.closePath();
         ctx.fill();
+        ctx.stroke();
         ctx.restore();
       }
       frame = requestAnimationFrame(draw);
@@ -142,13 +177,13 @@ export function CityMap({
 
   return (
     <div
-      className="absolute inset-0 z-20 grid place-items-center bg-[#05020c]/80 p-4 backdrop-blur-sm"
+      className="absolute inset-0 z-20 grid place-items-center bg-slate-900/60 p-4 backdrop-blur-sm"
       onClick={onClose}
     >
       <div className="flex w-full max-w-5xl flex-col gap-2" onClick={(event) => event.stopPropagation()}>
-        <div className="flex items-center justify-between font-mono text-xs tracking-widest text-fuchsia-300">
-          <span className="drop-shadow-[0_0_6px_#ff2bd6]">CITY MAP · CLICK TO TRAVEL</span>
-          <button type="button" onClick={onClose} className="rounded border border-fuchsia-500/50 px-2 py-0.5 hover:bg-fuchsia-500/20">
+        <div className="flex items-center justify-between text-xs font-semibold tracking-wide text-white">
+          <span>TOWN MAP · CLICK TO TRAVEL</span>
+          <button type="button" onClick={onClose} className="rounded-full bg-white/90 px-3 py-0.5 text-slate-800 hover:bg-white">
             CLOSE [M]
           </button>
         </div>
@@ -156,7 +191,7 @@ export function CityMap({
           ref={canvasRef}
           width={1200}
           height={Math.round((1200 * depth) / width)}
-          className="w-full cursor-crosshair rounded-lg border border-cyan-400/40 shadow-[0_0_30px_rgba(25,240,255,0.25)]"
+          className="w-full cursor-crosshair rounded-xl border-4 border-white shadow-xl"
           onMouseMove={(event) => setHover(toWorld(event))}
           onMouseLeave={() => setHover(undefined)}
           onClick={(event) => {
@@ -165,7 +200,7 @@ export function CityMap({
             onClose();
           }}
         />
-        <div className="h-4 font-mono text-xs text-cyan-200/80">
+        <div className="h-4 text-xs font-medium text-white/90">
           {hover && `${hoverZone ? ZONE_STYLE[hoverZone].label : 'OUTSKIRTS'} · ${hover.x.toFixed(0)}, ${hover.z.toFixed(0)}`}
         </div>
       </div>
